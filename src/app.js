@@ -1,4 +1,5 @@
 const express = require("express");
+const cors = require("cors");
 const dotenv = require("dotenv");
 const connectDB = require("./config/db.js");
 const userRoutes = require("../Routes/userRoutes");
@@ -11,6 +12,17 @@ dotenv.config();
 connectDB();
 
 const app = express();
+
+// CORS Configuration
+const corsOptions = {
+  origin: ['http://localhost:3000', 'https://your-frontend-domain.com'],
+  credentials: true,
+  optionsSuccessStatus: 200,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
 
 app.get("/", (req, res) => {
