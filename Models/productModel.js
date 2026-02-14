@@ -45,6 +45,19 @@ const productSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId, 
       ref: "User",
       required: false
+    },
+    cwProductId: {
+      type: String,
+      default: null,
+      index: true
+    },
+    platform: {
+      type: String,
+      default: null
+    },
+    region: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null
     }
   },
   { timestamps: true }

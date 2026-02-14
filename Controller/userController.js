@@ -195,6 +195,76 @@ exports.updateUser = async (req, res) => {
   }
 };
 
+// UPDATE PROFILE - Update own profile (authenticated user)
+exports.updateProfile = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { username, email, phonenumber, currentPassword, newPassword } = req.body;
+
+    // Check if at least one field is provided
+    if (!username && !email && !phonenumber && !newPassword) {
+      return res.status(400).json({
+        message: "At least one field is required to update",
+      });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // If changing password, verify current password
+    if (newPassword) {
+      if (!currentPassword) {
+        return res.status(400).json({ message: "Current password is required to change password" });
+      }
+      const isPasswordValid = await bcrypt.compare(currentPassword, user.password);
+      if (!isPasswordValid) {
+        return res.status(400).json({ message: "Current password is incorrect" });
+      }
+      if (newPassword.length < 6) {
+        return res.status(400).json({ message: "New password must be at least 6 characters" });
+      }
+      user.password = await bcrypt.hash(newPassword, 10);
+    }
+
+    // Check for duplicate username/email/phone
+    if (username && username !== user.username) {
+      const existing = await User.findOne({ username });
+      if (existing) return res.status(400).json({ message: "Username already taken" });
+      user.username = username;
+    }
+    if (email && email !== user.email) {
+      const existing = await User.findOne({ email });
+      if (existing) return res.status(400).json({ message: "Email already in use" });
+      user.email = email;
+    }
+    if (phonenumber && phonenumber !== user.phonenumber) {
+      const existing = await User.findOne({ phonenumber });
+      if (existing) return res.status(400).json({ message: "Phone number already in use" });
+      user.phonenumber = phonenumber;
+    }
+
+    await user.save();
+
+    res.status(200).json({
+      message: "Profile updated successfully",
+      user: {
+        _id: user._id,
+        username: user.username,
+        email: user.email,
+        phonenumber: user.phonenumber,
+        role: user.role,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      message: "Error updating profile",
+      error: error.message,
+    });
+  }
+};
+
 // DELETE - Delete user by ID
 exports.deleteUser = async (req, res) => {
   try {

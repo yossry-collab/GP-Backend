@@ -7,6 +7,7 @@ const {
   getAllUsers,
   getUserById,
   updateUser,
+  updateProfile,
   deleteUser,
 } = require("../Controller/userController");
 const { verifyToken } = require("../Middleware/authMiddleware");
@@ -16,6 +17,7 @@ router.post("/register", register);
 router.post("/login", login);
 
 // PROTECTED routes (requires valid JWT token)
+router.put("/profile", verifyToken, updateProfile);
 router.get("/get", verifyToken, getAllUsers);
 router.get("/get/:id", verifyToken, getUserById);
 router.put("/update/:id", verifyToken, updateUser);
