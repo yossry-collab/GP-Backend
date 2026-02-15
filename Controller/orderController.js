@@ -266,3 +266,53 @@ exports.getAllOrders = async (req, res) => {
     });
   }
 };
+
+// 6. Update Order Status - Admin update order status
+exports.updateOrderStatus = async (req, res) => {
+  try {
+    const userRole = req.user.role;
+    if (userRole !== "admin") {
+      return res.status(403).json({ message: "Admin access required." });
+    }
+
+    const { id } = req.params;
+    const { status, paymentStatus } = req.body;
+
+    const order = await Order.findById(id);
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    if (status) {
+      if (!["pending", "completed", "failed"].includes(status)) {
+        return res.status(400).json({ message: "Invalid status value" });
+      }
+      order.status = status;
+    }
+
+    if (paymentStatus) {
+      if (!["pending", "paid", "failed"].includes(paymentStatus)) {
+        return res.status(400).json({ message: "Invalid payment status value" });
+      }
+      order.paymentStatus = paymentStatus;
+    }
+
+    await order.save();
+
+    // Re-populate for response
+    await order.populate([
+      { path: "userId", select: "username email phonenumber" },
+      { path: "items.productId" },
+    ]);
+
+    return res.status(200).json({
+      message: "Order status updated successfully",
+      order,
+    });
+  } catch (error) {
+    res.status(500).json({
+      message: "Error updating order status",
+      error: error.message,
+    });
+  }
+};

@@ -73,7 +73,7 @@ function generateCouponCode() {
 // GET /api/loyalty/balance — Get user's points balance
 exports.getBalance = async (req, res) => {
   try {
-    const bal = await getOrCreateBalance(req.user.id);
+    const bal = await getOrCreateBalance(req.user.userId);
     res.json({
       points: bal.points,
       lifetimePoints: bal.lifetimePoints,
@@ -93,11 +93,11 @@ exports.getHistory = async (req, res) => {
     const skip = (page - 1) * limit;
 
     const [transactions, total] = await Promise.all([
-      PointsTransaction.find({ userId: req.user.id })
+      PointsTransaction.find({ userId: req.user.userId })
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit),
-      PointsTransaction.countDocuments({ userId: req.user.id }),
+      PointsTransaction.countDocuments({ userId: req.user.userId }),
     ]);
 
     res.json({ transactions, total, page, pages: Math.ceil(total / limit) });
@@ -109,7 +109,7 @@ exports.getHistory = async (req, res) => {
 // POST /api/loyalty/daily-login — Claim daily login points
 exports.dailyLogin = async (req, res) => {
   try {
-    const bal = await getOrCreateBalance(req.user.id);
+    const bal = await getOrCreateBalance(req.user.userId);
     const today = new Date().toISOString().split("T")[0];
 
     if (bal.dailyLoginDate === today) {
@@ -135,7 +135,7 @@ exports.dailyLogin = async (req, res) => {
     const totalPoints = basePoints + streakBonus;
 
     const result = await addPoints(
-      req.user.id,
+      req.user.userId,
       totalPoints,
       "earn",
       "daily_login",
@@ -164,7 +164,7 @@ exports.earnFromPurchase = async (req, res) => {
 
     // Check if already awarded for this order
     const existing = await PointsTransaction.findOne({
-      userId: req.user.id,
+      userId: req.user.userId,
       source: "purchase",
       "metadata.orderId": orderId,
     });
@@ -176,7 +176,7 @@ exports.earnFromPurchase = async (req, res) => {
     const points = Math.round(amount * ratio);
 
     const result = await addPoints(
-      req.user.id,
+      req.user.userId,
       points,
       "earn",
       "purchase",
@@ -197,7 +197,7 @@ exports.earnFromPurchase = async (req, res) => {
 exports.signupBonus = async (req, res) => {
   try {
     const existing = await PointsTransaction.findOne({
-      userId: req.user.id,
+      userId: req.user.userId,
       source: "signup",
     });
     if (existing) {
@@ -206,7 +206,7 @@ exports.signupBonus = async (req, res) => {
 
     const bonus = await getConfig("signup_bonus_points", 100);
     const result = await addPoints(
-      req.user.id,
+      req.user.userId,
       bonus,
       "earn",
       "signup",
@@ -245,7 +245,7 @@ exports.redeemReward = async (req, res) => {
       return res.status(404).json({ message: "Reward not found or disabled" });
     }
 
-    const bal = await getOrCreateBalance(req.user.id);
+    const bal = await getOrCreateBalance(req.user.userId);
 
     // Check tier requirement
     const tierOrder = { free: 0, silver: 1, gold: 2, none: 0 };
@@ -269,7 +269,7 @@ exports.redeemReward = async (req, res) => {
 
     // Deduct points
     const result = await addPoints(
-      req.user.id,
+      req.user.userId,
       -reward.pointsCost,
       "spend",
       "redeem_reward",
@@ -291,7 +291,7 @@ exports.redeemReward = async (req, res) => {
 
     // Log redemption
     const redemption = await Redemption.create({
-      userId: req.user.id,
+      userId: req.user.userId,
       rewardId: reward._id,
       pointsSpent: reward.pointsCost,
       couponCode,
@@ -312,7 +312,7 @@ exports.redeemReward = async (req, res) => {
 // GET /api/loyalty/redemptions — User's redemption history
 exports.getRedemptions = async (req, res) => {
   try {
-    const redemptions = await Redemption.find({ userId: req.user.id })
+    const redemptions = await Redemption.find({ userId: req.user.userId })
       .populate("rewardId", "name type image pointsCost")
       .sort({ createdAt: -1 });
     res.json(redemptions);
@@ -329,7 +329,7 @@ exports.getRedemptions = async (req, res) => {
 exports.getQuests = async (req, res) => {
   try {
     const quests = await Quest.find({ enabled: true }).sort({ sortOrder: 1 });
-    const userQuests = await UserQuest.find({ userId: req.user.id });
+    const userQuests = await UserQuest.find({ userId: req.user.userId });
     const progressMap = {};
     userQuests.forEach((uq) => {
       progressMap[uq.questId.toString()] = {
@@ -360,7 +360,7 @@ exports.completeQuest = async (req, res) => {
 
     // Check if already completed
     let userQuest = await UserQuest.findOne({
-      userId: req.user.id,
+      userId: req.user.userId,
       questId: quest._id,
     });
 
@@ -371,7 +371,7 @@ exports.completeQuest = async (req, res) => {
     // Create or update user quest
     if (!userQuest) {
       userQuest = await UserQuest.create({
-        userId: req.user.id,
+        userId: req.user.userId,
         questId: quest._id,
         completed: true,
         completedAt: new Date(),
@@ -386,7 +386,7 @@ exports.completeQuest = async (req, res) => {
 
     // Award points
     const result = await addPoints(
-      req.user.id,
+      req.user.userId,
       quest.rewardPoints,
       "earn",
       "quest",
@@ -426,7 +426,7 @@ exports.openPack = async (req, res) => {
       return res.status(404).json({ message: "Pack not found or disabled" });
     }
 
-    const bal = await getOrCreateBalance(req.user.id);
+    const bal = await getOrCreateBalance(req.user.userId);
 
     // Check tier
     const tierOrder = { free: 0, silver: 1, gold: 2, none: 0 };
@@ -440,7 +440,7 @@ exports.openPack = async (req, res) => {
     }
 
     // Deduct points for opening
-    await addPoints(req.user.id, -pack.pointsCost, "spend", "pack_open", `Opened pack: ${pack.name}`, { packId: pack._id });
+    await addPoints(req.user.userId, -pack.pointsCost, "spend", "pack_open", `Opened pack: ${pack.name}`, { packId: pack._id });
 
     // ── Weighted random selection (secure) ──
     const drops = pack.drops;
@@ -463,7 +463,7 @@ exports.openPack = async (req, res) => {
     switch (selectedDrop.type) {
       case "points": {
         const earned = selectedDrop.pointsAmount || 50;
-        await addPoints(req.user.id, earned, "earn", "pack_open", `Pack drop: ${earned} points`, { packId: pack._id });
+        await addPoints(req.user.userId, earned, "earn", "pack_open", `Pack drop: ${earned} points`, { packId: pack._id });
         resultValue = earned;
         description = `${earned} bonus points`;
         break;
@@ -492,7 +492,7 @@ exports.openPack = async (req, res) => {
 
     // Log the opening
     const opening = await PackOpening.create({
-      userId: req.user.id,
+      userId: req.user.userId,
       packId: pack._id,
       pointsSpent: pack.pointsCost,
       result: {
@@ -504,7 +504,7 @@ exports.openPack = async (req, res) => {
     });
 
     // Refresh balance
-    const updatedBal = await getOrCreateBalance(req.user.id);
+    const updatedBal = await getOrCreateBalance(req.user.userId);
 
     res.json({
       message: `Pack opened!`,
@@ -519,7 +519,7 @@ exports.openPack = async (req, res) => {
 // GET /api/loyalty/packs/history — User's pack opening history
 exports.getPackHistory = async (req, res) => {
   try {
-    const history = await PackOpening.find({ userId: req.user.id })
+    const history = await PackOpening.find({ userId: req.user.userId })
       .populate("packId", "name image")
       .sort({ createdAt: -1 })
       .limit(50);
@@ -538,7 +538,7 @@ exports.getMembership = async (req, res) => {
   try {
     const [tiers, bal] = await Promise.all([
       Membership.find({ enabled: true }),
-      getOrCreateBalance(req.user.id),
+      getOrCreateBalance(req.user.userId),
     ]);
     res.json({
       currentTier: bal.tier,
@@ -563,7 +563,7 @@ exports.upgradeTier = async (req, res) => {
       return res.status(404).json({ message: "Membership tier not found" });
     }
 
-    const bal = await getOrCreateBalance(req.user.id);
+    const bal = await getOrCreateBalance(req.user.userId);
     const cost = membership.price; // using price as points cost for now
 
     if (bal.points < cost) {
@@ -571,7 +571,7 @@ exports.upgradeTier = async (req, res) => {
     }
 
     // Deduct and upgrade
-    await addPoints(req.user.id, -cost, "spend", "tier_bonus", `Upgraded to ${membership.name}`, { tier });
+    await addPoints(req.user.userId, -cost, "spend", "tier_bonus", `Upgraded to ${membership.name}`, { tier });
 
     bal.tier = tier;
     bal.tierExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
@@ -746,7 +746,7 @@ exports.adminGrantPoints = async (req, res) => {
       amount > 0 ? "earn" : "spend",
       "admin_grant",
       reason || "Admin adjustment",
-      { adminId: req.user.id }
+      { adminId: req.user.userId }
     );
     res.json({ newBalance: result.balance.points, transaction: result.transaction });
   } catch (err) {
