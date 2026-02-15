@@ -57,6 +57,11 @@ exports.login = async (req, res) => {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
+    // Check if user is banned
+    if (user.isBanned) {
+      return res.status(403).json({ message: "Your account has been banned.", reason: user.banReason || 'No reason provided' });
+    }
+
     // Compare provided password with hashed password in DB
     const isPasswordValid = await bcrypt.compare(password, user.password);
 
@@ -262,6 +267,58 @@ exports.updateProfile = async (req, res) => {
       message: "Error updating profile",
       error: error.message,
     });
+  }
+};
+
+// BAN - Ban a user by ID
+exports.banUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Admin access required' });
+    }
+
+    const user = await User.findById(id);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    if (user.role === 'admin') {
+      return res.status(400).json({ message: 'Cannot ban an admin user' });
+    }
+
+    user.isBanned = true;
+    user.banReason = reason || '';
+    await user.save();
+
+    res.status(200).json({ message: 'User banned successfully', user: { _id: user._id, username: user.username, email: user.email, isBanned: user.isBanned, banReason: user.banReason } });
+  } catch (error) {
+    res.status(500).json({ message: 'Error banning user', error: error.message });
+  }
+};
+
+// UNBAN - Unban a user by ID
+exports.unbanUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Admin access required' });
+    }
+
+    const user = await User.findById(id);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    user.isBanned = false;
+    user.banReason = '';
+    await user.save();
+
+    res.status(200).json({ message: 'User unbanned successfully', user: { _id: user._id, username: user.username, email: user.email, isBanned: user.isBanned } });
+  } catch (error) {
+    res.status(500).json({ message: 'Error unbanning user', error: error.message });
   }
 };
 

@@ -331,3 +331,71 @@ exports.updateOrderStatus = async (req, res) => {
     });
   }
 };
+
+// 6. Override Order - Admin can edit items, prices, status (full override)
+exports.overrideOrder = async (req, res) => {
+  try {
+    const userRole = req.user.role;
+    if (userRole !== "admin") {
+      return res.status(403).json({ message: "Admin access required." });
+    }
+
+    const { id } = req.params;
+    const { items, totalPrice, totalItems, status, paymentStatus } = req.body;
+
+    const order = await Order.findById(id);
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    // Update items if provided
+    if (items && Array.isArray(items) && items.length > 0) {
+      order.items = items.map(item => ({
+        productId: item.productId,
+        quantity: item.quantity,
+        price: item.price,
+        name: item.name,
+        category: item.category || "",
+      }));
+    }
+
+    // Update totals
+    if (totalPrice !== undefined) {
+      order.totalPrice = totalPrice;
+    } else if (items) {
+      // Auto-calculate if items changed but totalPrice not provided
+      order.totalPrice = order.items.reduce((s, i) => s + i.price * i.quantity, 0);
+    }
+
+    if (totalItems !== undefined) {
+      order.totalItems = totalItems;
+    } else if (items) {
+      order.totalItems = order.items.reduce((s, i) => s + i.quantity, 0);
+    }
+
+    // Update status fields
+    if (status && ["pending", "completed", "failed"].includes(status)) {
+      order.status = status;
+    }
+    if (paymentStatus && ["pending", "paid", "failed"].includes(paymentStatus)) {
+      order.paymentStatus = paymentStatus;
+    }
+
+    await order.save();
+
+    await order.populate([
+      { path: "userId", select: "username email phonenumber" },
+      { path: "items.productId" },
+    ]);
+
+    return res.status(200).json({
+      message: "Order overridden successfully",
+      order,
+    });
+  } catch (error) {
+    res.status(500).json({
+      message: "Error overriding order",
+      error: error.message,
+    });
+  }
+};

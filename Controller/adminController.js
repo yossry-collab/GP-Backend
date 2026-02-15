@@ -222,3 +222,131 @@ exports.getStats = async (req, res) => {
     });
   }
 };
+
+// GET /api/admin/advanced-stats - Advanced KPI metrics
+exports.getAdvancedStats = async (req, res) => {
+  try {
+    if (req.user.role !== "admin") {
+      return res.status(403).json({ message: "Admin access required" });
+    }
+
+    const [orders, users, products] = await Promise.all([
+      Order.find().populate("items.productId", "name image category"),
+      User.countDocuments(),
+      Product.find().select("name price category stock"),
+    ]);
+
+    const completedOrders = orders.filter(o => o.status === "completed");
+    const totalRevenue = completedOrders.reduce((s, o) => s + (o.totalPrice || 0), 0);
+    const avgOrderValue = completedOrders.length > 0 ? totalRevenue / completedOrders.length : 0;
+    const conversionRate = orders.length > 0 ? (completedOrders.length / orders.length) * 100 : 0;
+
+    // Revenue by month (last 12 months)
+    const now = new Date();
+    const revenueByMonth = [];
+    for (let i = 11; i >= 0; i--) {
+      const start = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const end = new Date(now.getFullYear(), now.getMonth() - i + 1, 0, 23, 59, 59);
+      const monthOrders = completedOrders.filter(o => {
+        const d = new Date(o.createdAt);
+        return d >= start && d <= end;
+      });
+      const revenue = monthOrders.reduce((s, o) => s + (o.totalPrice || 0), 0);
+      revenueByMonth.push({
+        month: start.toLocaleString("default", { month: "short" }),
+        year: start.getFullYear(),
+        revenue: Math.round(revenue * 100) / 100,
+        orders: monthOrders.length,
+      });
+    }
+
+    // Top 5 products by order frequency
+    const productFreq = {};
+    const productRevenue = {};
+    orders.forEach(order => {
+      (order.items || []).forEach(item => {
+        const pid = item.productId?._id?.toString() || item.productId?.toString();
+        const name = item.name || item.productId?.name || "Unknown";
+        if (!pid) return;
+        if (!productFreq[pid]) {
+          productFreq[pid] = { name, image: item.productId?.image || "", category: item.productId?.category || item.category || "", count: 0, revenue: 0 };
+        }
+        productFreq[pid].count += item.quantity || 1;
+        productFreq[pid].revenue += (item.price || 0) * (item.quantity || 1);
+      });
+    });
+    const topProducts = Object.entries(productFreq)
+      .sort((a, b) => b[1].count - a[1].count)
+      .slice(0, 5)
+      .map(([id, data]) => ({ productId: id, ...data, revenue: Math.round(data.revenue * 100) / 100 }));
+
+    // Revenue this month
+    const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const revenueThisMonth = completedOrders
+      .filter(o => new Date(o.createdAt) >= thisMonthStart)
+      .reduce((s, o) => s + (o.totalPrice || 0), 0);
+
+    // Low stock products
+    const lowStock = products.filter(p => p.stock <= 5).map(p => ({ _id: p._id, name: p.name, stock: p.stock, category: p.category }));
+
+    // Top category by revenue
+    const categoryRevenue = {};
+    completedOrders.forEach(o => {
+      (o.items || []).forEach(item => {
+        const cat = item.category || item.productId?.category || "other";
+        categoryRevenue[cat] = (categoryRevenue[cat] || 0) + (item.price || 0) * (item.quantity || 1);
+      });
+    });
+    const topCategory = Object.entries(categoryRevenue).sort((a, b) => b[1] - a[1])[0];
+
+    res.status(200).json({
+      avgOrderValue: Math.round(avgOrderValue * 100) / 100,
+      conversionRate: Math.round(conversionRate * 10) / 10,
+      revenueThisMonth: Math.round(revenueThisMonth * 100) / 100,
+      totalRevenue: Math.round(totalRevenue * 100) / 100,
+      topCategory: topCategory ? { name: topCategory[0], revenue: Math.round(topCategory[1] * 100) / 100 } : null,
+      topProducts,
+      revenueByMonth,
+      lowStock,
+      totalOrders: orders.length,
+      completedOrders: completedOrders.length,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching advanced stats", error: error.message });
+  }
+};
+
+// GET /api/admin/mailing-list - Export user emails for mailing list
+exports.getMailingList = async (req, res) => {
+  try {
+    if (req.user.role !== "admin") {
+      return res.status(403).json({ message: "Admin access required" });
+    }
+
+    const users = await User.find().select("username email role isBanned createdAt").sort({ createdAt: -1 });
+
+    // Also get unique emails from orders (guests who might not have accounts)
+    const orderEmails = await Order.aggregate([
+      { $lookup: { from: "users", localField: "userId", foreignField: "_id", as: "user" } },
+      { $unwind: "$user" },
+      { $group: { _id: "$user.email", username: { $first: "$user.username" }, orderCount: { $sum: 1 }, totalSpent: { $sum: "$totalPrice" } } },
+      { $sort: { totalSpent: -1 } },
+    ]);
+
+    res.status(200).json({
+      message: "Mailing list retrieved",
+      totalUsers: users.length,
+      users: users.map(u => ({
+        _id: u._id,
+        username: u.username,
+        email: u.email,
+        role: u.role,
+        isBanned: u.isBanned || false,
+        joinedAt: u.createdAt,
+      })),
+      topBuyers: orderEmails.slice(0, 20),
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching mailing list", error: error.message });
+  }
+};

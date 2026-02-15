@@ -6,6 +6,7 @@ const {
   cancelOrder,
   getAllOrders,
   updateOrderStatus,
+  overrideOrder,
 } = require("../Controller/orderController");
 const { verifyToken } = require("../Middleware/authMiddleware");
 
@@ -22,6 +23,9 @@ router.get("/admin/all", verifyToken, getAllOrders);
 
 // PUT /admin/:id/status → updateOrderStatus (protected, admin only)
 router.put("/admin/:id/status", verifyToken, updateOrderStatus);
+
+// PUT /admin/:id/override → overrideOrder (protected, admin only)
+router.put("/admin/:id/override", verifyToken, overrideOrder);
 
 // GET /:id → getOrderById (protected)
 router.get("/:id", verifyToken, getOrderById);
