@@ -50,6 +50,19 @@ const orderSchema = new mongoose.Schema(
       enum: ["pending", "paid", "failed"],
       default: "pending",
     },
+    paymentMethod: {
+      type: String,
+      enum: ["flouci", "manual", "free"],
+      default: "flouci",
+    },
+    paymentId: {
+      type: String,
+      default: null,
+    },
+    flouciPaymentLink: {
+      type: String,
+      default: null,
+    },
   },
   { timestamps: true }
 );

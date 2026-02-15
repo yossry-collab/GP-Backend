@@ -97,25 +97,12 @@ exports.checkoutOrder = async (req, res) => {
     // Populate product details in the saved order
     await order.populate("items.productId");
 
-    // Update product stock (subtract ordered quantities)
-    for (const item of cartItems) {
-      await Product.findByIdAndUpdate(
-        item.productId,
-        { $inc: { stock: -item.quantity } },
-        { new: true }
-      );
-    }
-
-    // Clear MongoDB cart if it exists
-    await Cart.findOneAndUpdate(
-      { userId },
-      { items: [], totalPrice: 0, totalItems: 0 },
-      { new: true }
-    );
+    // NOTE: Stock deduction and cart clearing are now handled AFTER
+    // payment verification in paymentController.verifyPayment()
 
     // Return order confirmation
     return res.status(201).json({
-      message: "Order placed successfully",
+      message: "Order created successfully. Proceed to payment.",
       order,
     });
   } catch (error) {
@@ -222,13 +209,15 @@ exports.cancelOrder = async (req, res) => {
       });
     }
 
-    // Restore product stock as order is being cancelled
-    for (const item of order.items) {
-      await Product.findByIdAndUpdate(
-        item.productId,
-        { $inc: { stock: item.quantity } },
-        { new: true }
-      );
+    // Restore product stock only if payment was completed (stock was deducted)
+    if (order.paymentStatus === "paid") {
+      for (const item of order.items) {
+        await Product.findByIdAndUpdate(
+          item.productId,
+          { $inc: { stock: item.quantity } },
+          { new: true }
+        );
+      }
     }
 
     // Mark status as "failed"
