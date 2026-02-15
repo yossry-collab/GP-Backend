@@ -11,6 +11,7 @@ const cartRoutes = require("../Routes/cartRoutes");
 const orderRoutes = require("../Routes/orderRoutes");
 const cwRoutes = require("../Routes/codesWholesaleRoutes");
 const adminRoutes = require("../Routes/adminRoutes");
+const loyaltyRoutes = require("../Routes/loyaltyRoutes");
 
 connectDB();
 
@@ -52,6 +53,9 @@ app.use("/api/cw", cwRoutes);
 
 // Admin Routes
 app.use("/api/admin", adminRoutes);
+
+// Loyalty & Rewards Routes
+app.use("/api/loyalty", loyaltyRoutes);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
