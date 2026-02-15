@@ -39,19 +39,34 @@ const validatePrices = async (items) => {
 exports.checkoutOrder = async (req, res) => {
   try {
     const userId = req.user.userId || req.user._id;
+    let cartItems, cartTotalPrice, cartTotalItems;
 
-    // Get user's cart
-    const cart = await Cart.findOne({ userId });
-
-    // Validate cart exists and has items
-    if (!cart || cart.items.length === 0) {
-      return res.status(400).json({
-        message: "Cart is empty. Cannot proceed with checkout.",
-      });
+    // Accept items from request body (frontend localStorage cart)
+    if (req.body.items && req.body.items.length > 0) {
+      cartItems = req.body.items.map(item => ({
+        productId: item.productId,
+        quantity: item.quantity,
+        price: item.price,
+        name: item.name,
+        category: item.category || '',
+      }));
+      cartTotalItems = cartItems.reduce((sum, i) => sum + i.quantity, 0);
+      cartTotalPrice = cartItems.reduce((sum, i) => sum + i.price * i.quantity, 0);
+    } else {
+      // Fallback: check MongoDB cart
+      const cart = await Cart.findOne({ userId });
+      if (!cart || cart.items.length === 0) {
+        return res.status(400).json({
+          message: "Cart is empty. Cannot proceed with checkout.",
+        });
+      }
+      cartItems = cart.items;
+      cartTotalPrice = cart.totalPrice;
+      cartTotalItems = cart.totalItems;
     }
 
     // Validate all products still exist
-    for (const item of cart.items) {
+    for (const item of cartItems) {
       const product = await Product.findById(item.productId);
       if (!product) {
         return res.status(404).json({
@@ -61,17 +76,17 @@ exports.checkoutOrder = async (req, res) => {
     }
 
     // Validate stock for each item
-    await validateStockAvailability(cart.items);
+    await validateStockAvailability(cartItems);
 
     // Validate prices (warn if prices changed but still proceed)
-    await validatePrices(cart.items);
+    await validatePrices(cartItems);
 
     // Create new Order with cart items
     const order = new Order({
       userId,
-      items: cart.items,
-      totalPrice: cart.totalPrice,
-      totalItems: cart.totalItems,
+      items: cartItems,
+      totalPrice: cartTotalPrice,
+      totalItems: cartTotalItems,
       status: "pending",
       paymentStatus: "pending",
     });
@@ -83,7 +98,7 @@ exports.checkoutOrder = async (req, res) => {
     await order.populate("items.productId");
 
     // Update product stock (subtract ordered quantities)
-    for (const item of cart.items) {
+    for (const item of cartItems) {
       await Product.findByIdAndUpdate(
         item.productId,
         { $inc: { stock: -item.quantity } },
@@ -91,7 +106,7 @@ exports.checkoutOrder = async (req, res) => {
       );
     }
 
-    // Clear user's cart after order is successfully created
+    // Clear MongoDB cart if it exists
     await Cart.findOneAndUpdate(
       { userId },
       { items: [], totalPrice: 0, totalItems: 0 },
