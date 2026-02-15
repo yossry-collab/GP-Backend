@@ -10,6 +10,7 @@ const importRoutes = require("../Routes/importRoutes");
 const cartRoutes = require("../Routes/cartRoutes");
 const orderRoutes = require("../Routes/orderRoutes");
 const cwRoutes = require("../Routes/codesWholesaleRoutes");
+const adminRoutes = require("../Routes/adminRoutes");
 
 connectDB();
 
@@ -48,6 +49,9 @@ app.use("/api/orders", orderRoutes);
 
 // CodesWholesale Routes
 app.use("/api/cw", cwRoutes);
+
+// Admin Routes
+app.use("/api/admin", adminRoutes);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
