@@ -78,7 +78,16 @@ exports.register = async (req, res) => {
       email: user.email,
     });
   } catch (error) {
-    res.status(500).json({ message: "Registration error", error: error.message });
+    const isEmailConfigError =
+      error.message?.includes("Email service is not configured") ||
+      error.message?.includes("Email credentials missing");
+
+    res.status(isEmailConfigError ? 503 : 500).json({
+      message: isEmailConfigError
+        ? "Email verification service is not configured"
+        : "Registration error",
+      error: error.message,
+    });
   }
 };
 
