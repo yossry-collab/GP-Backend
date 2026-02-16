@@ -19,6 +19,10 @@ const productSchema = new mongoose.Schema(
       enum: ["game", "software", "gift-card"], 
       required: true 
     },
+    subcategory: {
+      type: String,
+      default: null
+    },
     image: { 
       type: String, 
       required: false 
@@ -28,10 +32,38 @@ const productSchema = new mongoose.Schema(
       default: 0 
     },
     rating: { 
-      type: Number, 
+      type: String, 
+      default: null
+    },
+    genre: {
+      type: String,
+      default: null
+    },
+    publisher: {
+      type: String,
+      default: null
+    },
+    releaseDate: {
+      type: String,
+      default: null
+    },
+    features: {
+      type: [String],
+      default: []
+    },
+    isDigital: {
+      type: Boolean,
+      default: true
+    },
+    discountPercentage: {
+      type: Number,
       default: 0,
       min: 0,
-      max: 5
+      max: 100
+    },
+    featured: {
+      type: Boolean,
+      default: false
     },
     reviews: [
       {
