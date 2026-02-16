@@ -13,6 +13,7 @@ const cwRoutes = require("../Routes/codesWholesaleRoutes");
 const adminRoutes = require("../Routes/adminRoutes");
 const loyaltyRoutes = require("../Routes/loyaltyRoutes");
 const paymentRoutes = require("../Routes/paymentRoutes");
+const notificationRoutes = require("../Routes/notificationRoutes");
 
 connectDB();
 
@@ -60,6 +61,9 @@ app.use("/api/loyalty", loyaltyRoutes);
 
 // Payment Routes (Flouci)
 app.use("/api/payment", paymentRoutes);
+
+// Notification Routes
+app.use("/api/notifications", notificationRoutes);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {

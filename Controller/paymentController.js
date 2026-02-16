@@ -21,11 +21,22 @@ const isFlouciConfigured = () => {
 // ═══════════════════════════════════════════════════════
 // Helper: Finalize an order after successful payment
 // ═══════════════════════════════════════════════════════
+const { createNotification } = require("./notificationController");
+
 const finalizeOrder = async (order) => {
   // 1. Update order status
   order.paymentStatus = "paid";
   order.status = "completed";
   await order.save();
+
+  // Send notification
+  await createNotification(
+    order.userId,
+    "payment_success",
+    "Payment Successful!",
+    `Your payment of $${order.totalPrice.toFixed(2)} was confirmed. Order #${order._id.toString().slice(-8).toUpperCase()} is now complete.`,
+    { orderId: order._id, amount: order.totalPrice }
+  );
 
   // 2. Deduct product stock
   for (const item of order.items) {

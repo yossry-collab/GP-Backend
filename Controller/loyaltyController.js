@@ -143,6 +143,16 @@ exports.dailyLogin = async (req, res) => {
       { streakDays: bal.streakDays }
     );
 
+    // Notify user about daily login points
+    const { createNotification } = require("./notificationController");
+    await createNotification(
+      req.user.userId,
+      "loyalty_points",
+      "Daily Login Reward",
+      `+${totalPoints} points! Day ${bal.streakDays} streak bonus.`,
+      { points: totalPoints, streakDays: bal.streakDays }
+    );
+
     res.json({
       points: totalPoints,
       streakDays: bal.streakDays,
@@ -184,6 +194,16 @@ exports.earnFromPurchase = async (req, res) => {
       { orderId }
     );
 
+    // Notify user about purchase points
+    const { createNotification: notify } = require("./notificationController");
+    await notify(
+      req.user.userId,
+      "loyalty_points",
+      "Points Earned!",
+      `You earned ${points} points from your purchase of $${amount.toFixed(2)}.`,
+      { points, orderId }
+    );
+
     res.json({
       earned: result.transaction.amount,
       newBalance: result.balance.points,
@@ -218,6 +238,16 @@ exports.signupBonus = async (req, res) => {
       newBalance: result.balance.points,
       message: `Welcome! You earned ${bonus} bonus points!`,
     });
+
+    // Notify user about signup bonus (fire-and-forget after response)
+    const { createNotification: notifyUser } = require("./notificationController");
+    notifyUser(
+      req.user.userId,
+      "welcome",
+      "Welcome to Game Plug!",
+      `You received ${bonus} bonus points for signing up. Start exploring!`,
+      { points: bonus }
+    );
   } catch (err) {
     res.status(500).json({ message: "Error granting signup bonus", error: err.message });
   }

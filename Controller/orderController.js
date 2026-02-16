@@ -2,6 +2,7 @@ const Order = require("../Models/orderModel");
 const Cart = require("../Models/cartModel");
 const Product = require("../Models/productModel");
 const User = require("../Models/userModel");
+const { createNotification } = require("./notificationController");
 
 // Helper function to validate stock availability
 const validateStockAvailability = async (items) => {
@@ -302,6 +303,28 @@ exports.updateOrderStatus = async (req, res) => {
     }
 
     await order.save();
+
+    // Send notification to the user about status change
+    const statusLabels = { pending: "Pending", completed: "Approved", failed: "Rejected" };
+    const paymentLabels = { pending: "Pending", paid: "Confirmed", failed: "Failed" };
+    if (status) {
+      await createNotification(
+        order.userId,
+        "order_status",
+        `Order ${statusLabels[status] || status}`,
+        `Your order #${order._id.toString().slice(-8).toUpperCase()} has been ${(statusLabels[status] || status).toLowerCase()}.`,
+        { orderId: order._id, status }
+      );
+    }
+    if (paymentStatus && paymentStatus === "paid") {
+      await createNotification(
+        order.userId,
+        "payment_success",
+        "Payment Confirmed",
+        `Payment for order #${order._id.toString().slice(-8).toUpperCase()} ($${order.totalPrice.toFixed(2)}) has been confirmed.`,
+        { orderId: order._id, amount: order.totalPrice }
+      );
+    }
 
     // Re-populate for response
     await order.populate([
