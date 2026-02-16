@@ -8,6 +8,9 @@ const userSchema = new mongoose.Schema(
     role: { type: String, enum: ['user', 'admin', 'visitor'], default: 'user' },
     isBanned: { type: Boolean, default: false },
     banReason: { type: String, default: '' },
+    isEmailVerified: { type: Boolean, default: false },
+    emailVerificationOtpHash: { type: String, default: null },
+    emailVerificationOtpExpiresAt: { type: Date, default: null },
   },
   { timestamps: true }
 );  

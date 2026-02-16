@@ -3,6 +3,8 @@ const router = express.Router();
 const {
   register,
   login,
+  verifyEmailOtp,
+  resendVerificationOtp,
   createUser,
   getAllUsers,
   getUserById,
@@ -17,6 +19,8 @@ const { verifyToken } = require("../Middleware/authMiddleware");
 // PUBLIC routes (no authentication needed)
 router.post("/register", register);
 router.post("/login", login);
+router.post("/verify-email-otp", verifyEmailOtp);
+router.post("/resend-email-otp", resendVerificationOtp);
 
 // PROTECTED routes (requires valid JWT token)
 router.put("/profile", verifyToken, updateProfile);
