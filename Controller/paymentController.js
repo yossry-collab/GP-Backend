@@ -5,6 +5,49 @@ const Product = require("../Models/productModel");
 
 const FLOUCI_API = "https://developers.flouci.com/api";
 
+// Check if Flouci credentials are configured (not placeholders)
+const isFlouciConfigured = () => {
+  const token = process.env.FLOUCI_APP_TOKEN;
+  const secret = process.env.FLOUCI_APP_SECRET;
+  return (
+    token &&
+    secret &&
+    token !== "your_flouci_app_token" &&
+    secret !== "your_flouci_app_secret" &&
+    !token.startsWith("your_")
+  );
+};
+
+// ═══════════════════════════════════════════════════════
+// Helper: Finalize an order after successful payment
+// ═══════════════════════════════════════════════════════
+const finalizeOrder = async (order) => {
+  // 1. Update order status
+  order.paymentStatus = "paid";
+  order.status = "completed";
+  await order.save();
+
+  // 2. Deduct product stock
+  for (const item of order.items) {
+    await Product.findByIdAndUpdate(
+      item.productId,
+      { $inc: { stock: -item.quantity } },
+      { new: true }
+    );
+  }
+
+  // 3. Clear user's MongoDB cart
+  await Cart.findOneAndUpdate(
+    { userId: order.userId },
+    { items: [], totalPrice: 0, totalItems: 0 },
+    { new: true }
+  );
+
+  // Populate for response
+  await order.populate("items.productId");
+  return order;
+};
+
 // 1. Initiate Payment — creates Flouci payment session for an existing order
 exports.initiatePayment = async (req, res) => {
   try {
@@ -38,12 +81,33 @@ exports.initiatePayment = async (req, res) => {
     const amountMillimes = Math.round(order.totalPrice * 1.1 * 1000);
 
     // Build success/fail URLs
-    const frontendUrl =
-      process.env.FRONTEND_URL || "http://localhost:3000";
+    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
     const successUrl = `${frontendUrl}/payment/success?order_id=${order._id}`;
     const failUrl = `${frontendUrl}/payment/fail?order_id=${order._id}`;
 
-    // Call Flouci generate_payment API
+    // ──────────────────────────────────────────────
+    // TEST MODE: Skip Flouci API when no real credentials
+    // ──────────────────────────────────────────────
+    if (!isFlouciConfigured()) {
+      console.log("[Payment] TEST MODE — Flouci credentials not configured, simulating payment");
+      const testPaymentId = `test_${order._id}_${Date.now()}`;
+
+      order.paymentId = testPaymentId;
+      order.flouciPaymentLink = `${successUrl}&payment_id=${testPaymentId}`;
+      order.paymentMethod = "flouci";
+      await order.save();
+
+      return res.status(200).json({
+        message: "Payment session created (TEST MODE)",
+        paymentLink: `${successUrl}&payment_id=${testPaymentId}`,
+        paymentId: testPaymentId,
+        testMode: true,
+      });
+    }
+
+    // ──────────────────────────────────────────────
+    // PRODUCTION: Call Flouci generate_payment API
+    // ──────────────────────────────────────────────
     const flouciRes = await axios.post(`${FLOUCI_API}/generate_payment`, {
       app_token: process.env.FLOUCI_APP_TOKEN,
       app_secret: process.env.FLOUCI_APP_SECRET,
@@ -108,6 +172,7 @@ exports.verifyPayment = async (req, res) => {
 
     // If already paid, return success without re-processing
     if (order.paymentStatus === "paid") {
+      await order.populate("items.productId");
       return res.status(200).json({
         message: "Payment already verified",
         status: "SUCCESS",
@@ -115,7 +180,23 @@ exports.verifyPayment = async (req, res) => {
       });
     }
 
-    // Call Flouci verify_payment API
+    // ──────────────────────────────────────────────
+    // TEST MODE: Auto-approve if payment_id starts with "test_"
+    // ──────────────────────────────────────────────
+    if (payment_id.startsWith("test_")) {
+      console.log("[Payment] TEST MODE — Auto-approving payment:", payment_id);
+      const finalizedOrder = await finalizeOrder(order);
+      return res.status(200).json({
+        message: "Payment verified successfully (TEST MODE)",
+        status: "SUCCESS",
+        order: finalizedOrder,
+        testMode: true,
+      });
+    }
+
+    // ──────────────────────────────────────────────
+    // PRODUCTION: Call Flouci verify_payment API
+    // ──────────────────────────────────────────────
     const flouciRes = await axios.get(
       `${FLOUCI_API}/verify_payment/${payment_id}`,
       {
@@ -129,36 +210,11 @@ exports.verifyPayment = async (req, res) => {
     const paymentStatus = flouciRes.data?.result?.status;
 
     if (paymentStatus === "SUCCESS") {
-      // ✅ Payment confirmed — finalize the order
-
-      // 1. Update order status
-      order.paymentStatus = "paid";
-      order.status = "completed";
-      await order.save();
-
-      // 2. Deduct product stock
-      for (const item of order.items) {
-        await Product.findByIdAndUpdate(
-          item.productId,
-          { $inc: { stock: -item.quantity } },
-          { new: true }
-        );
-      }
-
-      // 3. Clear user's MongoDB cart
-      await Cart.findOneAndUpdate(
-        { userId: order.userId },
-        { items: [], totalPrice: 0, totalItems: 0 },
-        { new: true }
-      );
-
-      // Populate for response
-      await order.populate("items.productId");
-
+      const finalizedOrder = await finalizeOrder(order);
       return res.status(200).json({
         message: "Payment verified successfully",
         status: "SUCCESS",
-        order,
+        order: finalizedOrder,
       });
     } else {
       // ❌ Payment not successful
