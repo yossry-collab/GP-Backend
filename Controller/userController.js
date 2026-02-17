@@ -227,7 +227,7 @@ exports.login = async (req, res) => {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    if (!user.isEmailVerified) {
+    if (user.isEmailVerified === false) {
       return res.status(403).json({
         message: "Please verify your email before logging in",
         requiresEmailVerification: true,

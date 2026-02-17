@@ -23,10 +23,17 @@ const buildTransporter = () => {
 };
 
 const sendVerificationOtpEmail = async ({ toEmail, username, otp }) => {
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-    throw new Error(
-      "Email credentials missing. Set SMTP_USER and SMTP_PASS in backend .env",
-    );
+  const smtpReady =
+    process.env.SMTP_USER &&
+    process.env.SMTP_PASS &&
+    (process.env.SMTP_SERVICE || process.env.SMTP_HOST);
+
+  if (!smtpReady) {
+    // ── DEV MODE: print OTP to console so registration still works ──
+    console.log(`\n========================================`);
+    console.log(`  OTP for ${toEmail}: ${otp}`);
+    console.log(`========================================\n`);
+    return; // skip sending email
   }
 
   const transporter = buildTransporter();
