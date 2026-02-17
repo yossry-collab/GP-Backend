@@ -29,13 +29,26 @@ exports.register = async (req, res) => {
       return res.status(400).json({ message: "All fields are required" });
     }
 
-    // Check if user exists
-    const existingUser = await User.findOne({
-      $or: [{ email }, { username }, { phonenumber }],
-    });
+    const existingByEmail = await User.findOne({ email });
+    const existingByUsername = await User.findOne({ username });
+    const existingByPhone = await User.findOne({ phonenumber });
 
-    if (existingUser && existingUser.isEmailVerified) {
-      return res.status(400).json({ message: "User already exists" });
+    if (existingByEmail?.isEmailVerified) {
+      return res.status(400).json({ message: "Email is already in use" });
+    }
+
+    if (
+      existingByUsername &&
+      (!existingByEmail || String(existingByUsername._id) !== String(existingByEmail._id))
+    ) {
+      return res.status(400).json({ message: "Username is already taken" });
+    }
+
+    if (
+      existingByPhone &&
+      (!existingByEmail || String(existingByPhone._id) !== String(existingByEmail._id))
+    ) {
+      return res.status(400).json({ message: "Phone number is already in use" });
     }
 
     // Hash password
@@ -45,14 +58,13 @@ exports.register = async (req, res) => {
     const otpExpiresAt = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000);
 
     let user;
-    if (existingUser && !existingUser.isEmailVerified) {
-      existingUser.username = username;
-      existingUser.email = email;
-      existingUser.password = hashedPassword;
-      existingUser.phonenumber = phonenumber;
-      existingUser.emailVerificationOtpHash = otpHash;
-      existingUser.emailVerificationOtpExpiresAt = otpExpiresAt;
-      user = await existingUser.save();
+    if (existingByEmail && !existingByEmail.isEmailVerified) {
+      existingByEmail.username = username;
+      existingByEmail.password = hashedPassword;
+      existingByEmail.phonenumber = phonenumber;
+      existingByEmail.emailVerificationOtpHash = otpHash;
+      existingByEmail.emailVerificationOtpExpiresAt = otpExpiresAt;
+      user = await existingByEmail.save();
     } else {
       user = new User({
         username,
@@ -78,6 +90,23 @@ exports.register = async (req, res) => {
       email: user.email,
     });
   } catch (error) {
+    if (error?.code === 11000) {
+      const duplicateField = Object.keys(error.keyPattern || {})[0] || "field";
+      const fieldLabel =
+        duplicateField === "phonenumber"
+          ? "Phone number"
+          : duplicateField === "username"
+            ? "Username"
+            : duplicateField === "email"
+              ? "Email"
+              : "Value";
+
+      return res.status(400).json({
+        message: `${fieldLabel} is already in use`,
+        error: error.message,
+      });
+    }
+
     const isEmailConfigError =
       error.message?.includes("Email service is not configured") ||
       error.message?.includes("Email credentials missing");
