@@ -9,7 +9,10 @@ const productRoutes = require("../Routes/productRoutes");
 const importRoutes = require("../Routes/importRoutes");
 const cartRoutes = require("../Routes/cartRoutes");
 const orderRoutes = require("../Routes/orderRoutes");
+const cwRoutes = require("../Routes/codesWholesaleRoutes");
 const adminRoutes = require("../Routes/adminRoutes");
+const loyaltyRoutes = require("../Routes/loyaltyRoutes");
+const paymentRoutes = require("../Routes/paymentRoutes");
 const notificationRoutes = require("../Routes/notificationRoutes");
 
 connectDB();
@@ -47,8 +50,17 @@ app.use("/api/cart", cartRoutes);
 // Order Routes
 app.use("/api/orders", orderRoutes);
 
+// CodesWholesale Routes
+app.use("/api/cw", cwRoutes);
+
 // Admin Routes
 app.use("/api/admin", adminRoutes);
+
+// Loyalty & Rewards Routes
+app.use("/api/loyalty", loyaltyRoutes);
+
+// Payment Routes (Flouci)
+app.use("/api/payment", paymentRoutes);
 
 // Notification Routes
 app.use("/api/notifications", notificationRoutes);
