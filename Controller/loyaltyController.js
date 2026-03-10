@@ -33,8 +33,292 @@ async function getConfig(key, fallback) {
 
 // Get tier multiplier
 function getTierMultiplier(tier) {
-  const multipliers = { free: 1, silver: 1.5, gold: 2 };
+  const multipliers = { free: 1, silver: 1.25, gold: 1.5, platinum: 2 };
   return multipliers[tier] || 1;
+}
+
+const TIER_ORDER = { free: 0, silver: 1, gold: 2, platinum: 3, none: 0 };
+const RARITY_ORDER = { common: 0, rare: 1, epic: 2, legendary: 3 };
+
+const DEFAULT_PACK_PROFILES = {
+  silver: {
+    name: "Silver Pack",
+    description: "A polished starter pack with guaranteed rare-tier loot and a rising chance of epic hits.",
+    image: "🥈",
+    headline: "Guaranteed Rare • Epic pity after 4 opens",
+    pointsCost: 180,
+    tierRequired: "free",
+    guaranteedRarity: "rare",
+    animationTheme: "silver",
+    pityEpicThreshold: 4,
+    pityLegendaryThreshold: 16,
+    bonusMultiplier: 1.02,
+    featured: true,
+    drops: [
+      { type: "points", rarity: "rare", weight: 42, pointsAmount: 90, label: "90 Points", revealText: "Clean pull. Stack the points." },
+      { type: "points", rarity: "rare", weight: 28, pointsAmount: 150, label: "150 Points", revealText: "Strong silver payout." },
+      { type: "coupon", rarity: "rare", weight: 18, discountPercent: 8, label: "8% Store Coupon", revealText: "A useful discount enters the club." },
+      { type: "coupon", rarity: "epic", weight: 7, discountPercent: 18, label: "18% Store Coupon", revealText: "Epic flare. Big savings unlocked." },
+      { type: "gift_card", rarity: "epic", weight: 4, discountAmount: 5, label: "€5 Gift Card", revealText: "Silver just turned premium." },
+      { type: "points", rarity: "legendary", weight: 1, pointsAmount: 1200, label: "Legendary 1200 Points", revealText: "Jackpot. The tunnel explodes in silver light." },
+    ],
+  },
+  gold: {
+    name: "Gold Pack",
+    description: "Elite drop rates, heavier jackpots, and a much faster path toward legendary reveals.",
+    image: "🥇",
+    headline: "Guaranteed Epic • Legendary pity after 7 opens",
+    pointsCost: 420,
+    tierRequired: "silver",
+    guaranteedRarity: "epic",
+    animationTheme: "gold",
+    pityEpicThreshold: 1,
+    pityLegendaryThreshold: 7,
+    bonusMultiplier: 1.08,
+    featured: true,
+    drops: [
+      { type: "points", rarity: "epic", weight: 32, pointsAmount: 320, label: "320 Points", revealText: "Gold pack, gold return." },
+      { type: "points", rarity: "epic", weight: 25, pointsAmount: 480, label: "480 Points", revealText: "A big epic surge." },
+      { type: "coupon", rarity: "epic", weight: 18, discountPercent: 22, label: "22% Store Coupon", revealText: "This is a serious coupon." },
+      { type: "gift_card", rarity: "epic", weight: 12, discountAmount: 10, label: "€10 Gift Card", revealText: "Gold-tier value secured." },
+      { type: "coupon", rarity: "legendary", weight: 8, discountPercent: 40, label: "40% Store Coupon", revealText: "Legendary discount. Massive value." },
+      { type: "points", rarity: "legendary", weight: 5, pointsAmount: 3000, label: "Legendary 3000 Points", revealText: "The stadium erupts. Monster point haul." },
+    ],
+  },
+  platinum: {
+    name: "Platinum Pack",
+    description: "Endgame pack energy. Premium odds, cinematic reveals, and the best jackpot ceiling in the system.",
+    image: "💎",
+    headline: "Guaranteed Epic • Legendary pity after 4 opens",
+    pointsCost: 900,
+    tierRequired: "platinum",
+    guaranteedRarity: "epic",
+    animationTheme: "platinum",
+    pityEpicThreshold: 1,
+    pityLegendaryThreshold: 4,
+    bonusMultiplier: 1.15,
+    featured: true,
+    drops: [
+      { type: "points", rarity: "epic", weight: 30, pointsAmount: 650, label: "650 Points", revealText: "Platinum points flood in." },
+      { type: "coupon", rarity: "epic", weight: 22, discountPercent: 30, label: "30% Store Coupon", revealText: "High-end coupon, instant impact." },
+      { type: "gift_card", rarity: "legendary", weight: 18, discountAmount: 20, label: "€20 Gift Card", revealText: "Legendary card. Premium pull." },
+      { type: "coupon", rarity: "legendary", weight: 14, discountPercent: 50, label: "50% Store Coupon", revealText: "Half-price destruction." },
+      { type: "points", rarity: "legendary", weight: 11, pointsAmount: 5000, label: "Legendary 5000 Points", revealText: "Platinum jackpot. Unreal hit." },
+      { type: "gift_card", rarity: "legendary", weight: 5, discountAmount: 50, label: "€50 Gift Card", revealText: "Top-board reward. Absolute scenes." },
+    ],
+  },
+};
+
+function normalizePackClass(pack) {
+  if (pack.packClass && DEFAULT_PACK_PROFILES[pack.packClass]) {
+    return pack.packClass;
+  }
+
+  const normalizedName = (pack.name || "").toLowerCase();
+  if (normalizedName.includes("platinum")) return "platinum";
+  if (normalizedName.includes("gold")) return "gold";
+  return "silver";
+}
+
+function ensurePackProgress(balance) {
+  if (!balance.packProgress) {
+    balance.packProgress = {};
+  }
+
+  for (const packClass of Object.keys(DEFAULT_PACK_PROFILES)) {
+    if (!balance.packProgress[packClass]) {
+      balance.packProgress[packClass] = { opens: 0, withoutEpic: 0, withoutLegendary: 0 };
+      continue;
+    }
+
+    balance.packProgress[packClass].opens = balance.packProgress[packClass].opens || 0;
+    balance.packProgress[packClass].withoutEpic = balance.packProgress[packClass].withoutEpic || 0;
+    balance.packProgress[packClass].withoutLegendary = balance.packProgress[packClass].withoutLegendary || 0;
+  }
+
+  return balance.packProgress;
+}
+
+function tierAllows(currentTier, requiredTier) {
+  if (!requiredTier || requiredTier === "none") return true;
+  return (TIER_ORDER[currentTier] || 0) >= (TIER_ORDER[requiredTier] || 0);
+}
+
+function rarityAtLeast(candidate, minimum) {
+  return (RARITY_ORDER[candidate] || 0) >= (RARITY_ORDER[minimum] || 0);
+}
+
+function getStrongerRarity(first, second) {
+  return (RARITY_ORDER[first] || 0) >= (RARITY_ORDER[second] || 0) ? first : second;
+}
+
+async function getPackLuckMultiplier(tier) {
+  if (!tier || tier === "free") {
+    return 1;
+  }
+
+  const membership = await Membership.findOne({ tier, enabled: true }).select("packLuckMultiplier");
+  return membership?.packLuckMultiplier || 1;
+}
+
+function buildLuckAdjustedWeight(drop, luckMultiplier) {
+  const rarityBias = {
+    common: Math.max(0.45, 1 - (luckMultiplier - 1) * 1.8),
+    rare: 1 + (luckMultiplier - 1) * 0.75,
+    epic: 1 + (luckMultiplier - 1) * 1.7,
+    legendary: 1 + (luckMultiplier - 1) * 2.6,
+  };
+
+  return Math.max(0.0001, drop.weight * (rarityBias[drop.rarity] || 1));
+}
+
+function chooseWeightedDrop(drops, luckMultiplier) {
+  const withAdjustedWeights = drops.map((drop) => ({
+    drop,
+    adjustedWeight: buildLuckAdjustedWeight(drop, luckMultiplier),
+  }));
+
+  const totalWeight = withAdjustedWeights.reduce((sum, entry) => sum + entry.adjustedWeight, 0);
+  const randomPoint = crypto.randomInt(0, Math.max(1, Math.floor(totalWeight * 1000))) / 1000;
+
+  let cumulative = 0;
+  for (const entry of withAdjustedWeights) {
+    cumulative += entry.adjustedWeight;
+    if (randomPoint <= cumulative) {
+      return entry.drop;
+    }
+  }
+
+  return withAdjustedWeights[withAdjustedWeights.length - 1]?.drop || drops[drops.length - 1];
+}
+
+function buildPackReveal(pack, selectedDrop, pityState) {
+  const packClass = normalizePackClass(pack);
+  const themeMap = {
+    silver: {
+      accent: "#cbd5e1",
+      halo: "rgba(226, 232, 240, 0.55)",
+      beam: "linear-gradient(180deg, rgba(255,255,255,0.85), rgba(148,163,184,0.25))",
+      title: "Silver Tunnel",
+      subtitle: "Precision lights. Clean reveal."
+    },
+    gold: {
+      accent: "#f59e0b",
+      halo: "rgba(251, 191, 36, 0.55)",
+      beam: "linear-gradient(180deg, rgba(255,245,157,0.92), rgba(245,158,11,0.28))",
+      title: "Gold Walkout",
+      subtitle: "Spotlights on. Big drop incoming."
+    },
+    platinum: {
+      accent: "#60a5fa",
+      halo: "rgba(96, 165, 250, 0.55)",
+      beam: "linear-gradient(180deg, rgba(255,255,255,0.92), rgba(96,165,250,0.28))",
+      title: "Platinum Storm",
+      subtitle: "Maximum drama. Endgame pull energy."
+    },
+  };
+
+  const selectedTheme = themeMap[packClass] || themeMap.silver;
+
+  return {
+    packClass,
+    animationTheme: pack.animationTheme || packClass,
+    guaranteedRarity: pack.guaranteedRarity || "rare",
+    pityTriggeredEpic: pityState.pityTriggeredEpic,
+    pityTriggeredLegendary: pityState.pityTriggeredLegendary,
+    accent: selectedTheme.accent,
+    halo: selectedTheme.halo,
+    beam: selectedTheme.beam,
+    title: selectedTheme.title,
+    subtitle: selectedDrop.revealText || selectedTheme.subtitle,
+    headline: pack.headline || "High-value pack",
+  };
+}
+
+function buildPackUserState(pack, balance) {
+  const packClass = normalizePackClass(pack);
+  const progress = ensurePackProgress(balance)[packClass];
+  const canOpen = tierAllows(balance.tier, pack.tierRequired) && balance.points >= pack.pointsCost;
+
+  let lockReason = null;
+  if (!tierAllows(balance.tier, pack.tierRequired)) {
+    lockReason = `${pack.tierRequired} tier required`;
+  } else if (balance.points < pack.pointsCost) {
+    lockReason = `${pack.pointsCost - balance.points} more points needed`;
+  }
+
+  return {
+    canOpen,
+    lockReason,
+    pity: {
+      opens: progress.opens,
+      withoutEpic: progress.withoutEpic,
+      withoutLegendary: progress.withoutLegendary,
+      remainingToEpic: Math.max(0, (pack.pityEpicThreshold || 0) - progress.withoutEpic),
+      remainingToLegendary: Math.max(0, (pack.pityLegendaryThreshold || 0) - progress.withoutLegendary),
+    },
+  };
+}
+
+async function ensureAdvancedLoyaltyDefaults() {
+  const configDefaults = [
+    { key: "points_per_euro", value: 10, description: "Points earned per €1 spent" },
+    { key: "signup_bonus_points", value: 100, description: "Points awarded on registration" },
+    { key: "daily_login_points", value: 10, description: "Base points for daily login" },
+  ];
+
+  for (const config of configDefaults) {
+    await LoyaltyConfig.findOneAndUpdate({ key: config.key }, config, { upsert: true, new: true });
+  }
+
+  const membershipDefaults = [
+    {
+      tier: "silver",
+      name: "GamePlus Silver",
+      price: 500,
+      yearlyPrice: 5000,
+      pointsMultiplier: 1.25,
+      packLuckMultiplier: 1.05,
+      monthlyBonusPoints: 120,
+      perks: ["1.25x points on purchases", "Access to Silver Packs", "Slightly improved pack luck", "Monthly 120-point bonus"],
+    },
+    {
+      tier: "gold",
+      name: "GamePlus Gold",
+      price: 1200,
+      yearlyPrice: 12000,
+      pointsMultiplier: 1.5,
+      packLuckMultiplier: 1.15,
+      monthlyBonusPoints: 300,
+      perks: ["1.5x points on purchases", "Access to Gold Packs", "Higher epic and legendary pull rate", "Monthly 300-point bonus"],
+    },
+    {
+      tier: "platinum",
+      name: "GamePlus Platinum",
+      price: 2400,
+      yearlyPrice: 24000,
+      pointsMultiplier: 2,
+      packLuckMultiplier: 1.3,
+      monthlyBonusPoints: 700,
+      perks: ["2x points on purchases", "Access to Platinum Packs", "Best pity protection in the game", "Monthly 700-point bonus", "Premium pull flair and top-tier rewards"],
+    },
+  ];
+
+  for (const membership of membershipDefaults) {
+    await Membership.findOneAndUpdate(
+      { tier: membership.tier },
+      { ...membership, enabled: true },
+      { upsert: true, new: true }
+    );
+  }
+
+  for (const [packClass, profile] of Object.entries(DEFAULT_PACK_PROFILES)) {
+    await Pack.findOneAndUpdate(
+      { packClass },
+      { ...profile, packClass, enabled: true },
+      { upsert: true, new: true }
+    );
+  }
 }
 
 // Add points transaction and update balance
@@ -278,8 +562,7 @@ exports.redeemReward = async (req, res) => {
     const bal = await getOrCreateBalance(req.user.userId);
 
     // Check tier requirement
-    const tierOrder = { free: 0, silver: 1, gold: 2, none: 0 };
-    if (reward.tierRequired !== "none" && tierOrder[bal.tier] < tierOrder[reward.tierRequired]) {
+    if (!tierAllows(bal.tier, reward.tierRequired)) {
       return res.status(403).json({ message: `Requires ${reward.tierRequired} tier or higher` });
     }
 
@@ -441,8 +724,29 @@ exports.completeQuest = async (req, res) => {
 // GET /api/loyalty/packs — List available packs
 exports.getPacks = async (req, res) => {
   try {
-    const packs = await Pack.find({ enabled: true }).select("-drops.weight"); // hide weights from client
-    res.json(packs);
+    await ensureAdvancedLoyaltyDefaults();
+
+    const bal = await getOrCreateBalance(req.user.userId);
+    ensurePackProgress(bal);
+
+    let packs = await Pack.find({ enabled: true, packClass: { $in: ["silver", "gold", "platinum"] } })
+      .select("-drops.weight")
+      .sort({ featured: -1, pointsCost: 1 });
+
+    if (packs.length === 0) {
+      packs = await Pack.find({ enabled: true }).select("-drops.weight").sort({ pointsCost: 1 });
+    }
+
+    res.json(
+      packs.map((pack) => {
+        const packData = pack.toObject();
+        return {
+          ...packData,
+          packClass: normalizePackClass(packData),
+          userState: buildPackUserState(packData, bal),
+        };
+      })
+    );
   } catch (err) {
     res.status(500).json({ message: "Error fetching packs", error: err.message });
   }
@@ -451,16 +755,20 @@ exports.getPacks = async (req, res) => {
 // POST /api/loyalty/packs/:id/open — Open a pack (secure server-side RNG)
 exports.openPack = async (req, res) => {
   try {
+    await ensureAdvancedLoyaltyDefaults();
+
     const pack = await Pack.findById(req.params.id);
     if (!pack || !pack.enabled) {
       return res.status(404).json({ message: "Pack not found or disabled" });
     }
 
     const bal = await getOrCreateBalance(req.user.userId);
+    const packClass = normalizePackClass(pack);
+    const progress = ensurePackProgress(bal)[packClass];
+    const membershipLuck = await getPackLuckMultiplier(bal.tier);
 
     // Check tier
-    const tierOrder = { free: 0, silver: 1, gold: 2, none: 0 };
-    if (pack.tierRequired !== "none" && tierOrder[bal.tier] < tierOrder[pack.tierRequired]) {
+    if (!tierAllows(bal.tier, pack.tierRequired)) {
       return res.status(403).json({ message: `Requires ${pack.tierRequired} tier` });
     }
 
@@ -472,19 +780,22 @@ exports.openPack = async (req, res) => {
     // Deduct points for opening
     await addPoints(req.user.userId, -pack.pointsCost, "spend", "pack_open", `Opened pack: ${pack.name}`, { packId: pack._id });
 
-    // ── Weighted random selection (secure) ──
-    const drops = pack.drops;
-    const totalWeight = drops.reduce((sum, d) => sum + d.weight, 0);
-    const rand = crypto.randomInt(0, totalWeight);
-    let cumulative = 0;
-    let selectedDrop = drops[drops.length - 1]; // fallback
-    for (const drop of drops) {
-      cumulative += drop.weight;
-      if (rand < cumulative) {
-        selectedDrop = drop;
-        break;
-      }
+    const pityTriggeredLegendary = !!pack.pityLegendaryThreshold && progress.withoutLegendary + 1 >= pack.pityLegendaryThreshold;
+    const pityTriggeredEpic = !pityTriggeredLegendary && !!pack.pityEpicThreshold && progress.withoutEpic + 1 >= pack.pityEpicThreshold;
+
+    let minimumRarity = pack.guaranteedRarity || "common";
+    if (pityTriggeredLegendary) {
+      minimumRarity = "legendary";
+    } else if (pityTriggeredEpic) {
+      minimumRarity = getStrongerRarity(minimumRarity, "epic");
     }
+
+    const eligibleDrops = pack.drops.filter((drop) => rarityAtLeast(drop.rarity, minimumRarity));
+    const dropsPool = eligibleDrops.length > 0 ? eligibleDrops : pack.drops;
+    const selectedDrop = chooseWeightedDrop(
+      dropsPool,
+      membershipLuck * (pack.bonusMultiplier || 1)
+    );
 
     // Process the drop reward
     let resultValue = null;
@@ -506,6 +817,15 @@ exports.openPack = async (req, res) => {
           discountAmount: selectedDrop.discountAmount,
         };
         description = selectedDrop.label || "Discount coupon";
+        break;
+      }
+      case "gift_card": {
+        const code = generateCouponCode();
+        resultValue = {
+          code,
+          amount: selectedDrop.discountAmount,
+        };
+        description = selectedDrop.label || `€${selectedDrop.discountAmount} gift card`;
         break;
       }
       case "product": {
@@ -535,11 +855,36 @@ exports.openPack = async (req, res) => {
 
     // Refresh balance
     const updatedBal = await getOrCreateBalance(req.user.userId);
+    const updatedProgress = ensurePackProgress(updatedBal)[packClass];
+    updatedProgress.opens += 1;
+    updatedProgress.withoutEpic = rarityAtLeast(selectedDrop.rarity, "epic") ? 0 : updatedProgress.withoutEpic + 1;
+    updatedProgress.withoutLegendary = selectedDrop.rarity === "legendary" ? 0 : updatedProgress.withoutLegendary + 1;
+    await updatedBal.save();
+
+    if (RARITY_ORDER[selectedDrop.rarity] >= RARITY_ORDER.epic) {
+      const { createNotification } = require("./notificationController");
+      await createNotification(
+        req.user.userId,
+        "loyalty_reward",
+        `${selectedDrop.rarity.toUpperCase()} Pack Pull!`,
+        `${selectedDrop.label || description} dropped from ${pack.name}.`,
+        {
+          packId: pack._id,
+          rarity: selectedDrop.rarity,
+          packClass,
+        }
+      );
+    }
 
     res.json({
       message: `Pack opened!`,
       result: opening.result,
       newBalance: updatedBal.points,
+      reveal: buildPackReveal(pack, selectedDrop, {
+        pityTriggeredEpic,
+        pityTriggeredLegendary,
+      }),
+      userState: buildPackUserState(pack, updatedBal),
     });
   } catch (err) {
     res.status(500).json({ message: "Error opening pack", error: err.message });
@@ -566,6 +911,8 @@ exports.getPackHistory = async (req, res) => {
 // GET /api/loyalty/membership — Get available tiers + user's current tier
 exports.getMembership = async (req, res) => {
   try {
+    await ensureAdvancedLoyaltyDefaults();
+
     const [tiers, bal] = await Promise.all([
       Membership.find({ enabled: true }),
       getOrCreateBalance(req.user.userId),
@@ -584,7 +931,7 @@ exports.getMembership = async (req, res) => {
 exports.upgradeTier = async (req, res) => {
   try {
     const { tier } = req.body;
-    if (!["silver", "gold"].includes(tier)) {
+    if (!["silver", "gold", "platinum"].includes(tier)) {
       return res.status(400).json({ message: "Invalid tier" });
     }
 
@@ -594,6 +941,10 @@ exports.upgradeTier = async (req, res) => {
     }
 
     const bal = await getOrCreateBalance(req.user.userId);
+    if ((TIER_ORDER[tier] || 0) <= (TIER_ORDER[bal.tier] || 0) && bal.tierExpiresAt && bal.tierExpiresAt > new Date()) {
+      return res.status(400).json({ message: "Choose a higher tier after your current pass ends" });
+    }
+
     const cost = membership.price; // using price as points cost for now
 
     if (bal.points < cost) {
@@ -853,15 +1204,7 @@ exports.adminUpsertMembership = async (req, res) => {
 exports.seedDefaults = async (req, res) => {
   if (!adminCheck(req, res)) return;
   try {
-    // Default configs
-    const defaults = [
-      { key: "points_per_euro", value: 10, description: "Points earned per €1 spent" },
-      { key: "signup_bonus_points", value: 100, description: "Points awarded on registration" },
-      { key: "daily_login_points", value: 10, description: "Base points for daily login" },
-    ];
-    for (const d of defaults) {
-      await LoyaltyConfig.findOneAndUpdate({ key: d.key }, d, { upsert: true });
-    }
+    await ensureAdvancedLoyaltyDefaults();
 
     // Default quests
     const questCount = await Quest.countDocuments();
@@ -885,79 +1228,6 @@ exports.seedDefaults = async (req, res) => {
         { name: "€5 Gift Card", description: "€5 credit for the store", type: "gift_card", pointsCost: 500, discountAmount: 5, image: "💳" },
         { name: "€10 Gift Card", description: "€10 credit for the store", type: "gift_card", pointsCost: 900, discountAmount: 10, image: "💎" },
         { name: "Mystery Game Key", description: "A random game key from our collection", type: "product", pointsCost: 1500, image: "🎮", stock: 50 },
-      ]);
-    }
-
-    // Default packs
-    const packCount = await Pack.countDocuments();
-    if (packCount === 0) {
-      await Pack.insertMany([
-        {
-          name: "Starter Pack",
-          description: "A basic pack with common rewards",
-          image: "📦",
-          pointsCost: 100,
-          drops: [
-            { type: "points", rarity: "common", weight: 50, pointsAmount: 20, label: "20 Points" },
-            { type: "points", rarity: "common", weight: 30, pointsAmount: 50, label: "50 Points" },
-            { type: "coupon", rarity: "rare", weight: 15, discountPercent: 5, label: "5% Coupon" },
-            { type: "coupon", rarity: "epic", weight: 4, discountPercent: 15, label: "15% Coupon" },
-            { type: "nothing", rarity: "common", weight: 1, label: "Empty..." },
-          ],
-        },
-        {
-          name: "Premium Pack",
-          description: "Higher chances for rare rewards",
-          image: "🎁",
-          pointsCost: 300,
-          drops: [
-            { type: "points", rarity: "common", weight: 30, pointsAmount: 50, label: "50 Points" },
-            { type: "points", rarity: "rare", weight: 25, pointsAmount: 150, label: "150 Points" },
-            { type: "coupon", rarity: "rare", weight: 20, discountPercent: 10, label: "10% Coupon" },
-            { type: "coupon", rarity: "epic", weight: 15, discountPercent: 25, label: "25% Coupon" },
-            { type: "gift_card", rarity: "epic", weight: 8, discountAmount: 5, label: "€5 Gift Card" },
-            { type: "gift_card", rarity: "legendary", weight: 2, discountAmount: 20, label: "€20 Gift Card" },
-          ],
-        },
-        {
-          name: "Legendary Pack",
-          description: "The ultimate pack — legendary drops await!",
-          image: "👑",
-          pointsCost: 750,
-          tierRequired: "silver",
-          drops: [
-            { type: "points", rarity: "rare", weight: 25, pointsAmount: 200, label: "200 Points" },
-            { type: "points", rarity: "epic", weight: 20, pointsAmount: 500, label: "500 Points" },
-            { type: "coupon", rarity: "epic", weight: 20, discountPercent: 30, label: "30% Coupon" },
-            { type: "gift_card", rarity: "epic", weight: 15, discountAmount: 10, label: "€10 Gift Card" },
-            { type: "gift_card", rarity: "legendary", weight: 10, discountAmount: 50, label: "€50 Gift Card" },
-            { type: "product", rarity: "legendary", weight: 5, label: "Mystery Game Key" },
-            { type: "points", rarity: "legendary", weight: 5, pointsAmount: 2000, label: "JACKPOT 2000 Points!" },
-          ],
-        },
-      ]);
-    }
-
-    // Default memberships
-    const membershipCount = await Membership.countDocuments();
-    if (membershipCount === 0) {
-      await Membership.insertMany([
-        {
-          tier: "silver",
-          name: "GamePlus Silver",
-          price: 500,
-          yearlyPrice: 5000,
-          pointsMultiplier: 1.5,
-          perks: ["1.5x points on purchases", "Access to Premium Packs", "Monthly bonus points"],
-        },
-        {
-          tier: "gold",
-          name: "GamePlus Gold",
-          price: 1200,
-          yearlyPrice: 12000,
-          pointsMultiplier: 2.0,
-          perks: ["2x points on purchases", "Access to Legendary Packs", "Exclusive rewards", "Priority support", "Monthly mega bonus"],
-        },
       ]);
     }
 

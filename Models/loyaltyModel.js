@@ -8,10 +8,27 @@ const loyaltyBalanceSchema = new mongoose.Schema(
     userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, unique: true },
     points: { type: Number, default: 0, min: 0 },
     lifetimePoints: { type: Number, default: 0, min: 0 }, // Total ever earned
-    tier: { type: String, enum: ["free", "silver", "gold"], default: "free" },
+    tier: { type: String, enum: ["free", "silver", "gold", "platinum"], default: "free" },
     tierExpiresAt: { type: Date, default: null },
     dailyLoginDate: { type: String, default: null }, // "YYYY-MM-DD" to track daily login
     streakDays: { type: Number, default: 0 },
+    packProgress: {
+      silver: {
+        opens: { type: Number, default: 0 },
+        withoutEpic: { type: Number, default: 0 },
+        withoutLegendary: { type: Number, default: 0 },
+      },
+      gold: {
+        opens: { type: Number, default: 0 },
+        withoutEpic: { type: Number, default: 0 },
+        withoutLegendary: { type: Number, default: 0 },
+      },
+      platinum: {
+        opens: { type: Number, default: 0 },
+        withoutEpic: { type: Number, default: 0 },
+        withoutLegendary: { type: Number, default: 0 },
+      },
+    },
   },
   { timestamps: true }
 );
@@ -68,7 +85,7 @@ const rewardSchema = new mongoose.Schema(
     image: { type: String, default: "" },
     stock: { type: Number, default: -1 }, // -1 = unlimited
     enabled: { type: Boolean, default: true },
-    tierRequired: { type: String, enum: ["free", "silver", "gold", "none"], default: "none" },
+    tierRequired: { type: String, enum: ["free", "silver", "gold", "platinum", "none"], default: "none" },
   },
   { timestamps: true }
 );
@@ -133,11 +150,19 @@ const packSchema = new mongoose.Schema(
     image: { type: String, default: "" },
     pointsCost: { type: Number, required: true, min: 0 },
     enabled: { type: Boolean, default: true },
-    tierRequired: { type: String, enum: ["free", "silver", "gold", "none"], default: "none" },
+    tierRequired: { type: String, enum: ["free", "silver", "gold", "platinum", "none"], default: "none" },
+    packClass: { type: String, enum: ["silver", "gold", "platinum"], default: "silver", index: true },
+    guaranteedRarity: { type: String, enum: ["common", "rare", "epic", "legendary"], default: "rare" },
+    animationTheme: { type: String, enum: ["silver", "gold", "platinum", "prismatic"], default: "silver" },
+    pityEpicThreshold: { type: Number, default: 0, min: 0 },
+    pityLegendaryThreshold: { type: Number, default: 0, min: 0 },
+    bonusMultiplier: { type: Number, default: 1, min: 1 },
+    featured: { type: Boolean, default: false },
+    headline: { type: String, default: "" },
     // Drop table: array of possible drops with weights
     drops: [
       {
-        type: { type: String, enum: ["points", "coupon", "product", "nothing"], required: true },
+        type: { type: String, enum: ["points", "coupon", "gift_card", "product", "nothing"], required: true },
         rarity: { type: String, enum: ["common", "rare", "epic", "legendary"], default: "common" },
         weight: { type: Number, required: true, min: 0 }, // relative probability
         // Reward details per type
@@ -146,6 +171,7 @@ const packSchema = new mongoose.Schema(
         discountAmount: { type: Number, default: 0 },
         productId: { type: mongoose.Schema.Types.ObjectId, ref: "Product", default: null },
         label: { type: String, default: "" }, // display name for the drop
+        revealText: { type: String, default: "" },
       },
     ],
   },
@@ -159,7 +185,7 @@ const packOpeningSchema = new mongoose.Schema(
     packId: { type: mongoose.Schema.Types.ObjectId, ref: "Pack", required: true },
     pointsSpent: { type: Number, required: true },
     result: {
-      type: { type: String, enum: ["points", "coupon", "product", "nothing"] },
+      type: { type: String, enum: ["points", "coupon", "gift_card", "product", "nothing"] },
       rarity: { type: String },
       label: { type: String },
       value: { type: mongoose.Schema.Types.Mixed }, // points amount, coupon code, product info
@@ -173,11 +199,13 @@ const packOpeningSchema = new mongoose.Schema(
 // ═══════════════════════════════════════════════════════
 const membershipSchema = new mongoose.Schema(
   {
-    tier: { type: String, enum: ["silver", "gold"], required: true, unique: true },
-    name: { type: String, required: true }, // "GamePlus Silver", "GamePlus Gold"
+    tier: { type: String, enum: ["silver", "gold", "platinum"], required: true, unique: true },
+    name: { type: String, required: true }, // "GamePlus Silver", "GamePlus Gold", "GamePlus Platinum"
     price: { type: Number, required: true }, // monthly price
     yearlyPrice: { type: Number, default: 0 }, // yearly price
     pointsMultiplier: { type: Number, default: 1.0 }, // e.g. 1.5x, 2x
+    packLuckMultiplier: { type: Number, default: 1.0 },
+    monthlyBonusPoints: { type: Number, default: 0 },
     perks: [{ type: String }], // description of perks
     enabled: { type: Boolean, default: true },
   },
