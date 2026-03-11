@@ -1,0 +1,15 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "check support controller",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"--check",
+				"Controller/supportController.js"
+			],
+			"isBackground": false
+		}
+	]
+}

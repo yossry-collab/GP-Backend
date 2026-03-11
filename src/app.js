@@ -14,6 +14,7 @@ const adminRoutes = require("../Routes/adminRoutes");
 const loyaltyRoutes = require("../Routes/loyaltyRoutes");
 const paymentRoutes = require("../Routes/paymentRoutes");
 const notificationRoutes = require("../Routes/notificationRoutes");
+const supportRoutes = require("../Routes/supportRoutes");
 
 connectDB();
 
@@ -64,6 +65,9 @@ app.use("/api/payment", paymentRoutes);
 
 // Notification Routes
 app.use("/api/notifications", notificationRoutes);
+
+// Support Routes
+app.use("/api/support", supportRoutes);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
