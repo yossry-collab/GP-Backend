@@ -1,6 +1,6 @@
 const express = require("express");
 const router = express.Router();
-const upload = require("../Middleware/uploadMiddleware");
+const { csvUpload } = require("../Middleware/uploadMiddleware");
 const { 
   importProductsCSV, 
   downloadSampleCSV 
@@ -8,7 +8,7 @@ const {
 const { verifyToken } = require("../Middleware/authMiddleware");
 
 // POST - Import products from CSV (protected)
-router.post("/import-csv", verifyToken, upload.single("file"), importProductsCSV);
+router.post("/import-csv", verifyToken, csvUpload.single("file"), importProductsCSV);
 
 // GET - Download sample CSV template (public)
 router.get("/sample-csv", downloadSampleCSV);

@@ -2,6 +2,15 @@ const User = require("../Models/userModel");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
+const toUserPayload = (user) => ({
+  _id: user._id,
+  username: user.username,
+  email: user.email,
+  phonenumber: user.phonenumber,
+  profileImage: user.profileImage || "",
+  role: user.role,
+});
+
 const issueTokenForUser = (user) => {
   return jwt.sign(
     { userId: user._id, email: user.email, role: user.role },
@@ -53,13 +62,7 @@ exports.register = async (req, res) => {
     res.status(201).json({
       message: "Registration successful",
       token,
-      user: {
-        _id: user._id,
-        username: user.username,
-        email: user.email,
-        phonenumber: user.phonenumber,
-        role: user.role,
-      },
+      user: toUserPayload(user),
     });
   } catch (error) {
     if (error?.code === 11000) {
@@ -120,13 +123,7 @@ exports.login = async (req, res) => {
     res.status(200).json({
       message: "Login successful",
       token,
-      user: {
-        _id: user._id,
-        username: user.username,
-        email,
-        phonenumber: user.phonenumber,
-        role: user.role,
-      }
+      user: toUserPayload(user)
     });
   } catch (error) {
     res.status(500).json({ message: "Login error", error: error.message });
@@ -308,17 +305,39 @@ exports.updateProfile = async (req, res) => {
 
     res.status(200).json({
       message: "Profile updated successfully",
-      user: {
-        _id: user._id,
-        username: user.username,
-        email: user.email,
-        phonenumber: user.phonenumber,
-        role: user.role,
-      },
+      user: toUserPayload(user),
     });
   } catch (error) {
     res.status(500).json({
       message: "Error updating profile",
+      error: error.message,
+    });
+  }
+};
+
+exports.uploadProfileImage = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+
+    if (!req.file) {
+      return res.status(400).json({ message: "Profile image file is required" });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    user.profileImage = `/uploads/profiles/${req.file.filename}`;
+    await user.save();
+
+    res.status(200).json({
+      message: "Profile image updated successfully",
+      user: toUserPayload(user),
+    });
+  } catch (error) {
+    res.status(500).json({
+      message: "Error uploading profile image",
       error: error.message,
     });
   }

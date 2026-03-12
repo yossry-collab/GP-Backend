@@ -8,11 +8,13 @@ const {
   getUserById,
   updateUser,
   updateProfile,
+  uploadProfileImage,
   deleteUser,
   banUser,
   unbanUser,
 } = require("../Controller/userController");
 const { verifyToken } = require("../Middleware/authMiddleware");
+const { avatarUpload } = require("../Middleware/uploadMiddleware");
 
 // PUBLIC routes (no authentication needed)
 router.post("/register", register);
@@ -20,6 +22,12 @@ router.post("/login", login);
 
 // PROTECTED routes (requires valid JWT token)
 router.put("/profile", verifyToken, updateProfile);
+router.post(
+  "/profile/avatar",
+  verifyToken,
+  avatarUpload.single("avatar"),
+  uploadProfileImage,
+);
 router.get("/get", verifyToken, getAllUsers);
 router.get("/get/:id", verifyToken, getUserById);
 router.put("/update/:id", verifyToken, updateUser);

@@ -3,6 +3,7 @@ dotenv.config();
 
 const express = require("express");
 const cors = require("cors");
+const path = require("path");
 const connectDB = require("./config/db.js");
 const userRoutes = require("../Routes/userRoutes");
 const productRoutes = require("../Routes/productRoutes");
@@ -31,6 +32,7 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 app.use(express.json());
+app.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
 
 app.get("/", (req, res) => {
   res.send("API running with MongoDB 🚀");
