@@ -7,6 +7,9 @@ const { LoyaltyBalance } = require("../Models/loyaltyModel");
 const Notification = require("../Models/notificationModel");
 const { createNotification } = require("./notificationController");
 const supportKnowledgeSeed = require("../data/supportKnowledgeSeed");
+const {
+  generateSupportAssistantReply,
+} = require("../Services/supportAssistantService");
 
 const getUserId = (req) => req.user.userId || req.user._id;
 
@@ -41,39 +44,111 @@ const ensureDefaultSupportKnowledge = async () => {
   }
 };
 
+const getKnowledgeArticles = async ({ locale = "en", category, search }) => {
+  await ensureDefaultSupportKnowledge();
+
+  const filter = { isPublished: true };
+  if (category) {
+    filter.category = category;
+  }
+
+  const articles = await SupportKnowledge.find(filter)
+    .sort({ sortOrder: 1, createdAt: 1 })
+    .lean();
+
+  return articles
+    .map((article) => toArticlePayload(article, locale))
+    .filter((article) => {
+      if (!search) return true;
+      const haystack = [
+        article.title,
+        article.question,
+        article.answer,
+        article.summary,
+        ...(article.tags || []),
+      ]
+        .join(" ")
+        .toLowerCase();
+
+      return haystack.includes(search.toLowerCase());
+    });
+};
+
+const buildSupportContext = async (userId) => {
+  const user = await User.findById(userId)
+    .select("username email phonenumber role")
+    .lean();
+
+  if (!user) {
+    return null;
+  }
+
+  const [orders, loyaltyBalance, unreadNotifications, openTickets, featuredProducts] =
+    await Promise.all([
+      Order.find({ userId })
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .select("items totalPrice totalItems status paymentStatus createdAt")
+        .lean(),
+      LoyaltyBalance.findOne({ userId })
+        .select("points lifetimePoints tier streakDays tierExpiresAt")
+        .lean(),
+      Notification.countDocuments({ userId, read: false }),
+      SupportTicket.countDocuments({
+        userId,
+        status: { $in: ["open", "in_progress", "waiting_on_customer"] },
+      }),
+      Product.find({ featured: true })
+        .sort({ updatedAt: -1 })
+        .limit(3)
+        .select("name category price stock discountPercentage platform")
+        .lean(),
+    ]);
+
+  const recentOrders = orders.map((order) => ({
+    _id: order._id,
+    totalPrice: order.totalPrice,
+    totalItems: order.totalItems,
+    status: order.status,
+    paymentStatus: order.paymentStatus,
+    createdAt: order.createdAt,
+    items: (order.items || []).map((item) => ({
+      productId: item.productId,
+      name: item.name,
+      quantity: item.quantity,
+      category: item.category,
+      price: item.price,
+    })),
+  }));
+
+  return {
+    user: {
+      _id: user._id,
+      email: user.email,
+      username: user.username,
+      phonenumber: user.phonenumber || "",
+      role: user.role,
+    },
+    recentOrders,
+    loyalty: loyaltyBalance || {
+      points: 0,
+      lifetimePoints: 0,
+      tier: "free",
+      streakDays: 0,
+      tierExpiresAt: null,
+    },
+    unreadNotifications,
+    openTickets,
+    featuredProducts,
+  };
+};
+
 exports.getKnowledgeBase = async (req, res) => {
   try {
-    await ensureDefaultSupportKnowledge();
-
     const locale = normalizeLocale(req.query.locale);
     const category = req.query.category;
     const search = req.query.search?.trim();
-    const filter = { isPublished: true };
-
-    if (category) {
-      filter.category = category;
-    }
-
-    const articles = await SupportKnowledge.find(filter)
-      .sort({ sortOrder: 1, createdAt: 1 })
-      .lean();
-
-    const shapedArticles = articles
-      .map((article) => toArticlePayload(article, locale))
-      .filter((article) => {
-        if (!search) return true;
-        const haystack = [
-          article.title,
-          article.question,
-          article.answer,
-          article.summary,
-          ...(article.tags || []),
-        ]
-          .join(" ")
-          .toLowerCase();
-
-        return haystack.includes(search.toLowerCase());
-      });
+    const shapedArticles = await getKnowledgeArticles({ locale, category, search });
 
     res.status(200).json({
       message: "Support knowledge retrieved successfully",
@@ -92,78 +167,64 @@ exports.getSupportContext = async (req, res) => {
   try {
     const userId = getUserId(req);
 
-    const user = await User.findById(userId)
-      .select("username email phonenumber role")
-      .lean();
+    const context = await buildSupportContext(userId);
 
-    if (!user) {
+    if (!context) {
       return res.status(404).json({ message: "User not found." });
     }
 
-    const [orders, loyaltyBalance, unreadNotifications, openTickets, featuredProducts] =
-      await Promise.all([
-        Order.find({ userId })
-          .sort({ createdAt: -1 })
-          .limit(5)
-          .select("items totalPrice totalItems status paymentStatus createdAt")
-          .lean(),
-        LoyaltyBalance.findOne({ userId })
-          .select("points lifetimePoints tier streakDays tierExpiresAt")
-          .lean(),
-        Notification.countDocuments({ userId, read: false }),
-        SupportTicket.countDocuments({
-          userId,
-          status: { $in: ["open", "in_progress", "waiting_on_customer"] },
-        }),
-        Product.find({ featured: true })
-          .sort({ updatedAt: -1 })
-          .limit(3)
-          .select("name category price stock discountPercentage platform")
-          .lean(),
-      ]);
-
-    const recentOrders = orders.map((order) => ({
-      _id: order._id,
-      totalPrice: order.totalPrice,
-      totalItems: order.totalItems,
-      status: order.status,
-      paymentStatus: order.paymentStatus,
-      createdAt: order.createdAt,
-      items: (order.items || []).map((item) => ({
-        productId: item.productId,
-        name: item.name,
-        quantity: item.quantity,
-        category: item.category,
-        price: item.price,
-      })),
-    }));
-
     res.status(200).json({
       message: "Support context retrieved successfully",
-      context: {
-        user: {
-          _id: user._id,
-          email: user.email,
-          username: user.username,
-          phonenumber: user.phonenumber || "",
-          role: user.role,
-        },
-        recentOrders,
-        loyalty: loyaltyBalance || {
-          points: 0,
-          lifetimePoints: 0,
-          tier: "free",
-          streakDays: 0,
-          tierExpiresAt: null,
-        },
-        unreadNotifications,
-        openTickets,
-        featuredProducts,
-      },
+      context,
     });
   } catch (error) {
     res.status(500).json({
       message: "Error retrieving support context",
+      error: error.message,
+    });
+  }
+};
+
+exports.askSupportAssistant = async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    const locale = normalizeLocale(req.body.locale);
+    const message = req.body.message?.trim();
+    const history = Array.isArray(req.body.history) ? req.body.history : [];
+
+    if (!message) {
+      return res.status(400).json({ message: "Message is required." });
+    }
+
+    const [context, articles] = await Promise.all([
+      buildSupportContext(userId),
+      getKnowledgeArticles({ locale, search: message }),
+    ]);
+
+    if (!context) {
+      return res.status(404).json({ message: "User not found." });
+    }
+
+    const assistantReply = await generateSupportAssistantReply({
+      locale,
+      message,
+      history,
+      articles,
+      supportContext: context,
+    });
+
+    res.status(200).json({
+      message: "Support assistant reply generated successfully",
+      reply: assistantReply.reply,
+      source: assistantReply.source,
+      matchedArticles: assistantReply.matchedArticles,
+      needsEscalation: assistantReply.needsEscalation,
+      suggestedPrompts: assistantReply.suggestedPrompts,
+      modelError: assistantReply.modelError,
+    });
+  } catch (error) {
+    res.status(500).json({
+      message: "Error generating support assistant reply",
       error: error.message,
     });
   }
