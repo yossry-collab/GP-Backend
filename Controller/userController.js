@@ -15,13 +15,15 @@ exports.register = async (req, res) => {
   try {
     const { username, email, password, phonenumber } = req.body;
 
-    if (!username || !email || !password || !phonenumber) {
-      return res.status(400).json({ message: "All fields are required" });
+    if (!username || !email || !password) {
+      return res.status(400).json({ message: "Username, email, and password are required" });
     }
 
     const existingByEmail = await User.findOne({ email });
     const existingByUsername = await User.findOne({ username });
-    const existingByPhone = await User.findOne({ phonenumber });
+    const existingByPhone = phonenumber
+      ? await User.findOne({ phonenumber })
+      : null;
 
     if (existingByEmail) {
       return res.status(400).json({ message: "Email is already in use" });
@@ -42,7 +44,7 @@ exports.register = async (req, res) => {
       username,
       email,
       password: hashedPassword,
-      phonenumber,
+      phonenumber: phonenumber || undefined,
     });
     await user.save();
 
