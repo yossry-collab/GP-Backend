@@ -23,7 +23,7 @@ const app = express();
 
 // CORS Configuration
 const corsOptions = {
-  origin: ['http://localhost:3000', 'http://localhost:3001', 'https://gameplug.onrender.com'],
+  origin: ['http://localhost:3000', 'http://localhost:3001', 'https://gameplug.onrender.com','https://gameplug.vercel.app'],
   credentials: true,
   optionsSuccessStatus: 200,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
