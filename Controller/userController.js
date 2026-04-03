@@ -6,6 +6,7 @@ const nodemailer = require("nodemailer");
 
 const RESET_CODE_LENGTH = 6;
 const RESET_CODE_TTL_MINUTES = 10;
+const SMTP_TIMEOUT_MS = 15000;
 
 const toUserPayload = (user) => ({
   _id: user._id,
@@ -52,9 +53,13 @@ const sendPasswordResetEmail = async (email, code) => {
       user: smtpUser,
       pass: smtpPass,
     },
+    connectionTimeout: SMTP_TIMEOUT_MS,
+    greetingTimeout: SMTP_TIMEOUT_MS,
+    socketTimeout: SMTP_TIMEOUT_MS,
   });
 
-  await transporter.sendMail({
+  await Promise.race([
+    transporter.sendMail({
     from: `GamePlug Security <${fromEmail}>`,
     to: email,
     subject: "GamePlug password reset code",
@@ -78,7 +83,13 @@ const sendPasswordResetEmail = async (email, code) => {
         </div>
       </div>
     `,
-  });
+    }),
+    new Promise((_, reject) => {
+      setTimeout(() => {
+        reject(new Error("SMTP request timed out. Please check SMTP credentials and provider access."));
+      }, SMTP_TIMEOUT_MS + 1000);
+    }),
+  ]);
 };
 
 // REGISTER to Create new user with hashed password
