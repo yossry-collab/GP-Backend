@@ -36,9 +36,6 @@ This backend is configured for free deployment on [Render](https://render.com).
 | `PORT` | `5000` |
 | `MONGO_URI` | Your MongoDB connection string (from MongoDB Atlas) |
 | `JWT_SECRET` | Your JWT secret key (can use any long random string) |
-| `OPENAI_API_KEY` | Your OpenAI-compatible API key for the support assistant |
-| `OPENAI_MODEL` | Optional. Example: `gpt-4o-mini` |
-| `OPENAI_BASE_URL` | Optional. Default: `https://api.openai.com/v1` |
 
 ### Step 4: Deploy
 1. Click **"Create Web Service"**
@@ -79,11 +76,6 @@ NODE_ENV=development
 **Cannot connect to MongoDB?**
 - Check MongoDB Atlas whitelist (allow all IPs or add Render's IP range)
 - Verify MONGO_URI is correct in environment variables
-
-**Support assistant answers feel basic?**
-- Verify `OPENAI_API_KEY` is present on Render
-- Optionally set `OPENAI_MODEL` to the model you want to use
-- Without these vars, the assistant falls back to built-in rule-based answers
 
 **Port already in use locally?**
 - Change `PORT` in `.env` to different value (e.g. 5001)

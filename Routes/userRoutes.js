@@ -3,6 +3,8 @@ const router = express.Router();
 const {
   register,
   login,
+  requestPasswordResetCode,
+  resetPasswordWithCode,
   createUser,
   getAllUsers,
   getUserById,
@@ -19,6 +21,8 @@ const { avatarUpload } = require("../Middleware/uploadMiddleware");
 // PUBLIC routes (no authentication needed)
 router.post("/register", register);
 router.post("/login", login);
+router.post("/forgot-password", requestPasswordResetCode);
+router.post("/reset-password", resetPasswordWithCode);
 
 // PROTECTED routes (requires valid JWT token)
 router.put("/profile", verifyToken, updateProfile);

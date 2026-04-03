@@ -9,6 +9,8 @@ const userSchema = new mongoose.Schema(
     role: { type: String, enum: ['user', 'admin', 'visitor'], default: 'user' },
     isBanned: { type: Boolean, default: false },
     banReason: { type: String, default: '' },
+    resetPasswordCodeHash: { type: String, default: null },
+    resetPasswordCodeExpiresAt: { type: Date, default: null },
   },
   { timestamps: true }
 );  

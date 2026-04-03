@@ -1,6 +1,11 @@
 const User = require("../Models/userModel");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
+const nodemailer = require("nodemailer");
+
+const RESET_CODE_LENGTH = 6;
+const RESET_CODE_TTL_MINUTES = 10;
 
 const toUserPayload = (user) => ({
   _id: user._id,
@@ -17,6 +22,63 @@ const issueTokenForUser = (user) => {
     process.env.JWT_SECRET,
     { expiresIn: "7d" },
   );
+};
+
+const normalizeEmail = (email = "") => email.trim().toLowerCase();
+
+const hashResetCode = (code) =>
+  crypto.createHash("sha256").update(code).digest("hex");
+
+const generateResetCode = () => {
+  const min = 10 ** (RESET_CODE_LENGTH - 1);
+  const max = 10 ** RESET_CODE_LENGTH - 1;
+  return String(Math.floor(Math.random() * (max - min + 1)) + min);
+};
+
+const sendPasswordResetEmail = async (email, code) => {
+  const smtpUser = process.env.SMTP_USER;
+  const smtpPass = process.env.SMTP_PASS;
+  const fromEmail = process.env.SMTP_FROM_EMAIL || smtpUser;
+
+  if (!smtpUser || !smtpPass || !fromEmail) {
+    throw new Error(
+      "Email service is not configured. Please set SMTP_USER, SMTP_PASS and SMTP_FROM_EMAIL.",
+    );
+  }
+
+  const transporter = nodemailer.createTransport({
+    service: "gmail",
+    auth: {
+      user: smtpUser,
+      pass: smtpPass,
+    },
+  });
+
+  await transporter.sendMail({
+    from: `GamePlug Security <${fromEmail}>`,
+    to: email,
+    subject: "GamePlug password reset code",
+    text: `Your GamePlug password reset code is ${code}. This code expires in ${RESET_CODE_TTL_MINUTES} minutes.`,
+    html: `
+      <div style="font-family: Arial, sans-serif; background: #f3f5f8; padding: 24px; color: #1f2937;">
+        <div style="max-width: 520px; margin: 0 auto; background: #ffffff; border-radius: 14px; padding: 28px; border: 1px solid #e5e7eb;">
+          <h2 style="margin: 0 0 8px; font-size: 24px; color: #111827;">GamePlug Security</h2>
+          <p style="margin: 0 0 18px; color: #4b5563; line-height: 1.5;">
+            We received a request to reset your password. Use the verification code below to continue.
+          </p>
+          <div style="font-size: 34px; letter-spacing: 8px; font-weight: 700; text-align: center; color: #0f172a; background: #f8fafc; border: 1px dashed #cbd5e1; border-radius: 12px; padding: 16px 10px; margin: 10px 0 20px;">
+            ${code}
+          </div>
+          <p style="margin: 0 0 10px; color: #4b5563; line-height: 1.5;">
+            This code expires in <strong>${RESET_CODE_TTL_MINUTES} minutes</strong>.
+          </p>
+          <p style="margin: 0; color: #6b7280; line-height: 1.5;">
+            If you did not request this reset, you can safely ignore this email.
+          </p>
+        </div>
+      </div>
+    `,
+  });
 };
 
 // REGISTER to Create new user with hashed password
@@ -129,6 +191,95 @@ exports.login = async (req, res) => {
     res.status(500).json({ message: "Login error", error: error.message });
   }
 };
+
+exports.requestPasswordResetCode = async (req, res) => {
+  try {
+    const email = normalizeEmail(req.body?.email);
+
+    if (!email) {
+      return res.status(400).json({ message: "Email is required" });
+    }
+
+    const user = await User.findOne({ email });
+
+    if (!user) {
+      return res.status(200).json({
+        message: "If this email exists, a reset code has been sent.",
+      });
+    }
+
+    const resetCode = generateResetCode();
+    user.resetPasswordCodeHash = hashResetCode(resetCode);
+    user.resetPasswordCodeExpiresAt = new Date(
+      Date.now() + RESET_CODE_TTL_MINUTES * 60 * 1000,
+    );
+    await user.save();
+
+    await sendPasswordResetEmail(email, resetCode);
+
+    res.status(200).json({
+      message: "Verification code sent to your email.",
+    });
+  } catch (error) {
+    res.status(500).json({
+      message: "Failed to send reset code",
+      error: error.message,
+    });
+  }
+};
+
+exports.resetPasswordWithCode = async (req, res) => {
+  try {
+    const email = normalizeEmail(req.body?.email);
+    const code = String(req.body?.code || "").trim();
+    const newPassword = String(req.body?.newPassword || "");
+
+    if (!email || !code || !newPassword) {
+      return res.status(400).json({
+        message: "Email, code, and new password are required",
+      });
+    }
+
+    if (!/^\d{6}$/.test(code)) {
+      return res.status(400).json({ message: "Code must be 6 digits" });
+    }
+
+    if (newPassword.length < 6) {
+      return res
+        .status(400)
+        .json({ message: "Password must be at least 6 characters" });
+    }
+
+    const user = await User.findOne({ email });
+
+    if (
+      !user ||
+      !user.resetPasswordCodeHash ||
+      !user.resetPasswordCodeExpiresAt ||
+      user.resetPasswordCodeExpiresAt.getTime() < Date.now()
+    ) {
+      return res.status(400).json({ message: "Code is invalid or expired" });
+    }
+
+    const incomingHash = hashResetCode(code);
+    if (incomingHash !== user.resetPasswordCodeHash) {
+      return res.status(400).json({ message: "Code is invalid or expired" });
+    }
+
+    user.password = await bcrypt.hash(newPassword, 10);
+    user.resetPasswordCodeHash = null;
+    user.resetPasswordCodeExpiresAt = null;
+    await user.save();
+
+    res.status(200).json({ message: "Password reset successfully" });
+  } catch (error) {
+    res.status(500).json({
+      message: "Failed to reset password",
+      error: error.message,
+    });
+  }
+};
+
 // CREATE - Add a new user
 exports.createUser = async (req, res) => {
   try {

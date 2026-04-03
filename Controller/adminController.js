@@ -79,14 +79,14 @@ function generateVirtualData(real) {
 
   // ── Virtual recent users to fill the table ──
   const virtualNames = [
-    { username: "sophia_dev", email: "sophia.chen@gmail.com", role: "user" },
-    { username: "marcus_k", email: "marcus.kelly@outlook.com", role: "user" },
-    { username: "emma_w", email: "emma.wilson@yahoo.com", role: "user" },
-    { username: "alex_j", email: "alex.johnson@proton.me", role: "admin" },
-    { username: "nadia_r", email: "nadia.rossi@gmail.com", role: "user" },
-    { username: "liam_t", email: "liam.thomas@hotmail.com", role: "user" },
-    { username: "yuki_m", email: "yuki.miyamoto@gmail.com", role: "user" },
-    { username: "carlos_f", email: "carlos.fernandez@live.com", role: "user" },
+    { username: "leomessi", email: "leo.messi@gmail.com", role: "user" },
+    { username: "vladimir_putin", email: "vladimir.putin@outlook.com", role: "user" },
+    { username: "abu ubaidah", email: "free.palestine@yahoo.com", role: "user" },
+    { username: "alaya brigui", email: "alaya.brigui@gmail.me", role: "admin" },
+    { username: "lamineyamal", email: "lamineyamal@gmail.com", role: "user" },
+    { username: "cr7", email: "cristiano.ronaldi@hotmail.com", role: "user" },
+    { username: "neymarjr", email: "ney.jr@gmail.com", role: "user" },
+    { username: "roberto carlos", email: "carlos.roberto@live.com", role: "user" },
   ];
 
   // Mix real recent users with virtual ones (real first, fill up to 8)
