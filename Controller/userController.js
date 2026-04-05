@@ -70,30 +70,35 @@ const sendWithBrevo = async (email, code) => {
     return false;
   }
 
-  const emailContent = buildPasswordResetEmail(code);
+  try {
+    const emailContent = buildPasswordResetEmail(code);
 
-  await axios.post(
-    "https://api.brevo.com/v3/smtp/email",
-    {
-      sender: {
-        name: brevoFromName,
-        email: brevoFromEmail,
+    await axios.post(
+      "https://api.brevo.com/v3/smtp/email",
+      {
+        sender: {
+          name: brevoFromName,
+          email: brevoFromEmail,
+        },
+        to: [{ email }],
+        subject: emailContent.subject,
+        textContent: emailContent.text,
+        htmlContent: emailContent.html,
       },
-      to: [{ email }],
-      subject: emailContent.subject,
-      textContent: emailContent.text,
-      htmlContent: emailContent.html,
-    },
-    {
-      headers: {
-        "api-key": brevoApiKey,
-        "Content-Type": "application/json",
+      {
+        headers: {
+          "api-key": brevoApiKey,
+          "Content-Type": "application/json",
+        },
+        timeout: SMTP_TIMEOUT_MS,
       },
-      timeout: SMTP_TIMEOUT_MS,
-    },
-  );
+    );
 
-  return true;
+    return true;
+  } catch (error) {
+    console.error("Brevo API error:", error.message);
+    return false;
+  }
 };
 
 const sendPasswordResetEmail = async (email, code) => {
