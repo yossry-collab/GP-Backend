@@ -98,13 +98,17 @@ const sendWithBrevo = async (email, code) => {
   } catch (error) {
     const brevoStatus = error.response?.status;
     const brevoPayload = error.response?.data;
+    const brevoReason =
+      brevoPayload?.message ||
+      brevoPayload?.code ||
+      error.message;
     console.error("Brevo API error:", {
       message: error.message,
       status: brevoStatus,
       response: brevoPayload,
     });
     throw new Error(
-      `Brevo email failed${brevoStatus ? ` (status ${brevoStatus})` : ""}. Please verify BREVO_API_KEY, BREVO_FROM_EMAIL, and sender verification in Brevo.`,
+      `Brevo email failed${brevoStatus ? ` (status ${brevoStatus})` : ""}${brevoReason ? `: ${brevoReason}` : ""}. Please verify BREVO_API_KEY, BREVO_FROM_EMAIL, and sender verification in Brevo.`,
     );
   }
 };
