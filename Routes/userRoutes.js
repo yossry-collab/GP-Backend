@@ -4,6 +4,7 @@ const {
   register,
   login,
   requestPasswordResetCode,
+  verifyPasswordResetCode,
   resetPasswordWithCode,
   createUser,
   getAllUsers,
@@ -22,6 +23,7 @@ const { avatarUpload } = require("../Middleware/uploadMiddleware");
 router.post("/register", register);
 router.post("/login", login);
 router.post("/forgot-password", requestPasswordResetCode);
+router.post("/verify-reset-code", verifyPasswordResetCode);
 router.post("/reset-password", resetPasswordWithCode);
 
 // PROTECTED routes (requires valid JWT token)

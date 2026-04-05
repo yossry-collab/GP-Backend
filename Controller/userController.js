@@ -239,6 +239,46 @@ exports.requestPasswordResetCode = async (req, res) => {
   }
 };
 
+exports.verifyPasswordResetCode = async (req, res) => {
+  try {
+    const email = normalizeEmail(req.body?.email);
+    const code = String(req.body?.code || "").trim();
+
+    if (!email || !code) {
+      return res.status(400).json({
+        message: "Email and code are required",
+      });
+    }
+
+    if (!/^\d{6}$/.test(code)) {
+      return res.status(400).json({ message: "Code must be 6 digits" });
+    }
+
+    const user = await User.findOne({ email });
+
+    if (
+      !user ||
+      !user.resetPasswordCodeHash ||
+      !user.resetPasswordCodeExpiresAt ||
+      user.resetPasswordCodeExpiresAt.getTime() < Date.now()
+    ) {
+      return res.status(400).json({ message: "Code is invalid or expired" });
+    }
+
+    const incomingHash = hashResetCode(code);
+    if (incomingHash !== user.resetPasswordCodeHash) {
+      return res.status(400).json({ message: "Code is invalid or expired" });
+    }
+
+    res.status(200).json({ message: "Code verified successfully" });
+  } catch (error) {
+    res.status(500).json({
+      message: "Failed to verify code",
+      error: error.message,
+    });
+  }
+};
+
 exports.resetPasswordWithCode = async (req, res) => {
   try {
     const email = normalizeEmail(req.body?.email);
