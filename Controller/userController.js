@@ -67,7 +67,7 @@ const sendWithBrevo = async (email, code) => {
   const brevoFromName = process.env.BREVO_FROM_NAME || "GamePlug Security";
 
   if (!brevoApiKey || !brevoFromEmail) {
-    return false;
+    return null;
   }
 
   try {
@@ -96,14 +96,22 @@ const sendWithBrevo = async (email, code) => {
 
     return true;
   } catch (error) {
-    console.error("Brevo API error:", error.message);
-    return false;
+    const brevoStatus = error.response?.status;
+    const brevoPayload = error.response?.data;
+    console.error("Brevo API error:", {
+      message: error.message,
+      status: brevoStatus,
+      response: brevoPayload,
+    });
+    throw new Error(
+      `Brevo email failed${brevoStatus ? ` (status ${brevoStatus})` : ""}. Please verify BREVO_API_KEY, BREVO_FROM_EMAIL, and sender verification in Brevo.`,
+    );
   }
 };
 
 const sendPasswordResetEmail = async (email, code) => {
-  const sentViaBrevo = await sendWithBrevo(email, code);
-  if (sentViaBrevo) {
+  const brevoResult = await sendWithBrevo(email, code);
+  if (brevoResult === true) {
     return;
   }
 
