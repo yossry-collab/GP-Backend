@@ -40,6 +40,12 @@ const sendPasswordResetEmail = async (email, code) => {
   const smtpUser = process.env.SMTP_USER;
   const smtpPass = process.env.SMTP_PASS;
   const fromEmail = process.env.SMTP_FROM_EMAIL || smtpUser;
+  const smtpHost = process.env.SMTP_HOST || "smtp.gmail.com";
+  const smtpPort = Number(process.env.SMTP_PORT || 465);
+  const smtpSecure =
+    process.env.SMTP_SECURE === undefined
+      ? smtpPort === 465
+      : String(process.env.SMTP_SECURE).toLowerCase() === "true";
 
   if (!smtpUser || !smtpPass || !fromEmail) {
     throw new Error(
@@ -48,7 +54,9 @@ const sendPasswordResetEmail = async (email, code) => {
   }
 
   const transporter = nodemailer.createTransport({
-    service: "gmail",
+    host: smtpHost,
+    port: smtpPort,
+    secure: smtpSecure,
     auth: {
       user: smtpUser,
       pass: smtpPass,
@@ -57,6 +65,8 @@ const sendPasswordResetEmail = async (email, code) => {
     greetingTimeout: SMTP_TIMEOUT_MS,
     socketTimeout: SMTP_TIMEOUT_MS,
   });
+
+  await transporter.verify();
 
   await Promise.race([
     transporter.sendMail({
@@ -232,8 +242,13 @@ exports.requestPasswordResetCode = async (req, res) => {
       message: "Verification code sent to your email.",
     });
   } catch (error) {
+    const details = String(error.message || "");
+    const timedOut = /timeout|timed out|ETIMEDOUT|ESOCKET/i.test(details);
+
     res.status(500).json({
-      message: "Failed to send reset code",
+      message: timedOut
+        ? "Failed to send reset code (SMTP timeout). Check SMTP host/port/security and provider access from your hosting platform."
+        : "Failed to send reset code",
       error: error.message,
     });
   }
