@@ -102,20 +102,74 @@ const sendWithBrevo = async (email, code) => {
       brevoPayload?.message ||
       brevoPayload?.code ||
       error.message;
-    console.error("Brevo API error:", {
+    console.warn("Brevo API unavailable, falling back to other mail providers:", {
       message: error.message,
       status: brevoStatus,
       response: brevoPayload,
     });
-    throw new Error(
-      `Brevo email failed${brevoStatus ? ` (status ${brevoStatus})` : ""}${brevoReason ? `: ${brevoReason}` : ""}. Please verify BREVO_API_KEY, BREVO_FROM_EMAIL, and sender verification in Brevo.`,
-    );
+    return false;
+  }
+};
+
+const sendWithSmtp = async (email, code) => {
+  const emailContent = buildPasswordResetEmail(code);
+  const smtpUser = process.env.SMTP_USER;
+  const smtpPass = process.env.SMTP_PASS;
+  const fromEmail = process.env.SMTP_FROM_EMAIL || smtpUser;
+  const smtpHost = process.env.SMTP_HOST || "smtp.gmail.com";
+  const smtpPort = Number(process.env.SMTP_PORT || 465);
+  const smtpSecure =
+    process.env.SMTP_SECURE === undefined
+      ? smtpPort === 465
+      : String(process.env.SMTP_SECURE).toLowerCase() === "true";
+
+  if (!smtpUser || !smtpPass || !fromEmail) {
+    return false;
+  }
+
+  const transporter = nodemailer.createTransport({
+    host: smtpHost,
+    port: smtpPort,
+    secure: smtpSecure,
+    auth: {
+      user: smtpUser,
+      pass: smtpPass,
+    },
+    connectionTimeout: SMTP_TIMEOUT_MS,
+    greetingTimeout: SMTP_TIMEOUT_MS,
+    socketTimeout: SMTP_TIMEOUT_MS,
+  });
+
+  try {
+    await transporter.verify();
+
+    await Promise.race([
+      transporter.sendMail({
+        from: `GamePlug Security <${fromEmail}>`,
+        to: email,
+        subject: emailContent.subject,
+        text: emailContent.text,
+        html: emailContent.html,
+      }),
+      new Promise((_, reject) => {
+        setTimeout(() => {
+          reject(new Error("SMTP request timed out. Please check SMTP credentials and provider access."));
+        }, SMTP_TIMEOUT_MS + 1000);
+      }),
+    ]);
+
+    return true;
+  } catch (error) {
+    console.warn("SMTP email unavailable, falling back to other mail providers:", {
+      message: error.message,
+    });
+    return false;
   }
 };
 
 const sendPasswordResetEmail = async (email, code) => {
-  const brevoResult = await sendWithBrevo(email, code);
-  if (brevoResult === true) {
+  const smtpResult = await sendWithSmtp(email, code);
+  if (smtpResult === true) {
     return;
   }
 
@@ -148,51 +202,14 @@ const sendPasswordResetEmail = async (email, code) => {
     return;
   }
 
-  const smtpUser = process.env.SMTP_USER;
-  const smtpPass = process.env.SMTP_PASS;
-  const fromEmail = process.env.SMTP_FROM_EMAIL || smtpUser;
-  const smtpHost = process.env.SMTP_HOST || "smtp.gmail.com";
-  const smtpPort = Number(process.env.SMTP_PORT || 465);
-  const smtpSecure =
-    process.env.SMTP_SECURE === undefined
-      ? smtpPort === 465
-      : String(process.env.SMTP_SECURE).toLowerCase() === "true";
-
-  if (!smtpUser || !smtpPass || !fromEmail) {
-    throw new Error(
-      "Email service is not configured. Please set SMTP_USER, SMTP_PASS and SMTP_FROM_EMAIL.",
-    );
+  const brevoResult = await sendWithBrevo(email, code);
+  if (brevoResult === true) {
+    return;
   }
 
-  const transporter = nodemailer.createTransport({
-    host: smtpHost,
-    port: smtpPort,
-    secure: smtpSecure,
-    auth: {
-      user: smtpUser,
-      pass: smtpPass,
-    },
-    connectionTimeout: SMTP_TIMEOUT_MS,
-    greetingTimeout: SMTP_TIMEOUT_MS,
-    socketTimeout: SMTP_TIMEOUT_MS,
-  });
-
-  await transporter.verify();
-
-  await Promise.race([
-    transporter.sendMail({
-      from: `GamePlug Security <${fromEmail}>`,
-      to: email,
-      subject: emailContent.subject,
-      text: emailContent.text,
-      html: emailContent.html,
-    }),
-    new Promise((_, reject) => {
-      setTimeout(() => {
-        reject(new Error("SMTP request timed out. Please check SMTP credentials and provider access."));
-      }, SMTP_TIMEOUT_MS + 1000);
-    }),
-  ]);
+  throw new Error(
+    "Failed to send reset code using SMTP, Resend, or Brevo.",
+  );
 };
 
 // REGISTER to Create new user with hashed password
