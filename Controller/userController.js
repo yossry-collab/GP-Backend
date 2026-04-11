@@ -4,10 +4,95 @@ const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const axios = require("axios");
 const nodemailer = require("nodemailer");
+const {
+  normalizeEmail,
+  validateTrustedEmail,
+} = require("../Services/emailValidationService");
 
 const RESET_CODE_LENGTH = 6;
 const RESET_CODE_TTL_MINUTES = 10;
 const SMTP_TIMEOUT_MS = 15000;
+
+const smtpTransporters = new Map();
+
+const getSmtpConfigCandidates = () => {
+  const smtpUser = process.env.SMTP_USER;
+  const smtpPass = process.env.SMTP_PASS;
+  const smtpHost = process.env.SMTP_HOST || "smtp.gmail.com";
+  const smtpPort = Number(process.env.SMTP_PORT || 465);
+  const smtpSecure =
+    process.env.SMTP_SECURE === undefined
+      ? smtpPort === 465
+      : String(process.env.SMTP_SECURE).toLowerCase() === "true";
+
+  if (!smtpUser || !smtpPass) {
+    return [];
+  }
+
+  const candidates = [
+    {
+      user: smtpUser,
+      pass: smtpPass,
+      host: smtpHost,
+      port: smtpPort,
+      secure: smtpSecure,
+    },
+  ];
+
+  if (smtpHost === "smtp.gmail.com") {
+    if (smtpPort !== 587 || smtpSecure !== false) {
+      candidates.push({
+        user: smtpUser,
+        pass: smtpPass,
+        host: smtpHost,
+        port: 587,
+        secure: false,
+      });
+    }
+
+    if (smtpPort !== 465 || smtpSecure !== true) {
+      candidates.push({
+        user: smtpUser,
+        pass: smtpPass,
+        host: smtpHost,
+        port: 465,
+        secure: true,
+      });
+    }
+  }
+
+  return candidates;
+};
+
+const getSmtpTransporter = (smtpConfig) => {
+  const key = `${smtpConfig.host}:${smtpConfig.port}:${smtpConfig.secure}`;
+
+  if (smtpTransporters.has(key)) {
+    return smtpTransporters.get(key);
+  }
+
+  const transporter = nodemailer.createTransport({
+    host: smtpConfig.host,
+    port: smtpConfig.port,
+    secure: smtpConfig.secure,
+    auth: {
+      user: smtpConfig.user,
+      pass: smtpConfig.pass,
+    },
+    pool: {
+      maxConnections: 3,
+      maxMessages: 100,
+      rateDelta: 1000,
+      rateLimit: 5,
+    },
+    connectionTimeout: SMTP_TIMEOUT_MS,
+    greetingTimeout: SMTP_TIMEOUT_MS,
+    socketTimeout: SMTP_TIMEOUT_MS,
+  });
+
+  smtpTransporters.set(key, transporter);
+  return transporter;
+};
 
 const toUserPayload = (user) => ({
   _id: user._id,
@@ -25,8 +110,6 @@ const issueTokenForUser = (user) => {
     { expiresIn: "7d" },
   );
 };
-
-const normalizeEmail = (email = "") => email.trim().toLowerCase();
 
 const hashResetCode = (code) =>
   crypto.createHash("sha256").update(code).digest("hex");
@@ -67,7 +150,7 @@ const sendWithBrevo = async (email, code) => {
   const brevoFromName = process.env.BREVO_FROM_NAME || "GamePlug Security";
 
   if (!brevoApiKey || !brevoFromEmail) {
-    return null;
+    return { ok: false, skipped: true, reason: "BREVO_API_KEY/BREVO_FROM_EMAIL not set" };
   }
 
   try {
@@ -94,7 +177,7 @@ const sendWithBrevo = async (email, code) => {
       },
     );
 
-    return true;
+    return { ok: true };
   } catch (error) {
     const brevoStatus = error.response?.status;
     const brevoPayload = error.response?.data;
@@ -107,70 +190,65 @@ const sendWithBrevo = async (email, code) => {
       status: brevoStatus,
       response: brevoPayload,
     });
-    return false;
+    return {
+      ok: false,
+      reason: `Brevo${brevoStatus ? ` ${brevoStatus}` : ""}${brevoReason ? `: ${brevoReason}` : ""}`,
+    };
   }
 };
 
 const sendWithSmtp = async (email, code) => {
   const emailContent = buildPasswordResetEmail(code);
-  const smtpUser = process.env.SMTP_USER;
-  const smtpPass = process.env.SMTP_PASS;
-  const fromEmail = process.env.SMTP_FROM_EMAIL || smtpUser;
-  const smtpHost = process.env.SMTP_HOST || "smtp.gmail.com";
-  const smtpPort = Number(process.env.SMTP_PORT || 465);
-  const smtpSecure =
-    process.env.SMTP_SECURE === undefined
-      ? smtpPort === 465
-      : String(process.env.SMTP_SECURE).toLowerCase() === "true";
+  const fromEmail = process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER;
+  const smtpConfigCandidates = getSmtpConfigCandidates();
 
-  if (!smtpUser || !smtpPass || !fromEmail) {
-    return false;
+  if (!smtpConfigCandidates.length || !fromEmail) {
+    return { ok: false, skipped: true, reason: "SMTP transport not configured" };
   }
 
-  const transporter = nodemailer.createTransport({
-    host: smtpHost,
-    port: smtpPort,
-    secure: smtpSecure,
-    auth: {
-      user: smtpUser,
-      pass: smtpPass,
-    },
-    connectionTimeout: SMTP_TIMEOUT_MS,
-    greetingTimeout: SMTP_TIMEOUT_MS,
-    socketTimeout: SMTP_TIMEOUT_MS,
-  });
+  const smtpErrors = [];
 
-  try {
-    await transporter.verify();
+  for (const smtpConfig of smtpConfigCandidates) {
+    const transporter = getSmtpTransporter(smtpConfig);
 
-    await Promise.race([
-      transporter.sendMail({
-        from: `GamePlug Security <${fromEmail}>`,
-        to: email,
-        subject: emailContent.subject,
-        text: emailContent.text,
-        html: emailContent.html,
-      }),
-      new Promise((_, reject) => {
-        setTimeout(() => {
-          reject(new Error("SMTP request timed out. Please check SMTP credentials and provider access."));
-        }, SMTP_TIMEOUT_MS + 1000);
-      }),
-    ]);
+    try {
+      await Promise.race([
+        transporter.sendMail({
+          from: `GamePlug Security <${fromEmail}>`,
+          to: email,
+          subject: emailContent.subject,
+          text: emailContent.text,
+          html: emailContent.html,
+        }),
+        new Promise((_, reject) => {
+          setTimeout(() => {
+            reject(new Error("SMTP request timed out. Please check SMTP credentials and provider access."));
+          }, SMTP_TIMEOUT_MS + 1000);
+        }),
+      ]);
 
-    return true;
-  } catch (error) {
-    console.warn("SMTP email unavailable, falling back to other mail providers:", {
-      message: error.message,
-    });
-    return false;
+      return { ok: true };
+    } catch (error) {
+      const details = `${smtpConfig.host}:${smtpConfig.port}/${smtpConfig.secure ? "ssl" : "tls"} - ${error.message}`;
+      smtpErrors.push(details);
+      console.warn("SMTP email unavailable, trying next SMTP option if available:", {
+        details,
+      });
+    }
   }
+
+  return { ok: false, reason: `SMTP: ${smtpErrors.join(" | ")}` };
 };
 
 const sendPasswordResetEmail = async (email, code) => {
+  const providerErrors = [];
+
   const smtpResult = await sendWithSmtp(email, code);
-  if (smtpResult === true) {
+  if (smtpResult.ok === true) {
     return;
+  }
+  if (!smtpResult.skipped && smtpResult.reason) {
+    providerErrors.push(smtpResult.reason);
   }
 
   const emailContent = buildPasswordResetEmail(code);
@@ -181,51 +259,75 @@ const sendPasswordResetEmail = async (email, code) => {
     process.env.SMTP_USER;
 
   if (resendApiKey && resendFromEmail) {
-    await axios.post(
-      "https://api.resend.com/emails",
-      {
-        from: `GamePlug Security <${resendFromEmail}>`,
-        to: [email],
-        subject: emailContent.subject,
-        text: emailContent.text,
-        html: emailContent.html,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${resendApiKey}`,
-          "Content-Type": "application/json",
+    try {
+      await axios.post(
+        "https://api.resend.com/emails",
+        {
+          from: `GamePlug Security <${resendFromEmail}>`,
+          to: [email],
+          subject: emailContent.subject,
+          text: emailContent.text,
+          html: emailContent.html,
         },
-        timeout: SMTP_TIMEOUT_MS,
-      },
-    );
+        {
+          headers: {
+            Authorization: `Bearer ${resendApiKey}`,
+            "Content-Type": "application/json",
+          },
+          timeout: SMTP_TIMEOUT_MS,
+        },
+      );
 
-    return;
+      return;
+    } catch (error) {
+      const status = error.response?.status;
+      const reason = error.response?.data?.message || error.message;
+      providerErrors.push(`Resend${status ? ` ${status}` : ""}${reason ? `: ${reason}` : ""}`);
+      console.warn("Resend API unavailable, falling back to other mail providers:", {
+        message: error.message,
+        status,
+        response: error.response?.data,
+      });
+    }
   }
 
   const brevoResult = await sendWithBrevo(email, code);
-  if (brevoResult === true) {
+  if (brevoResult.ok === true) {
     return;
+  }
+  if (!brevoResult.skipped && brevoResult.reason) {
+    providerErrors.push(brevoResult.reason);
   }
 
   throw new Error(
-    "Failed to send reset code using SMTP, Resend, or Brevo.",
+    `Failed to send reset code using SMTP, Resend, or Brevo. ${providerErrors.length ? `Details: ${providerErrors.join(" | ")}` : "No provider was configured."}`,
   );
 };
 
 // REGISTER to Create new user with hashed password
 exports.register = async (req, res) => {
   try {
-    const { username, email, password, phonenumber } = req.body;
+    const username = String(req.body?.username || "").trim();
+    const password = String(req.body?.password || "");
+    const phonenumber = String(req.body?.phonenumber || "").trim();
+    const emailCheck = validateTrustedEmail(req.body?.email);
+    const normalizedEmail = emailCheck.normalizedEmail;
 
-    if (!username || !email || !password) {
+    if (!username || !normalizedEmail || !password) {
       return res.status(400).json({ message: "Username, email, and password are required" });
     }
 
-    const existingByEmail = await User.findOne({ email });
-    const existingByUsername = await User.findOne({ username });
-    const existingByPhone = phonenumber
-      ? await User.findOne({ phonenumber })
-      : null;
+    if (!emailCheck.isValid) {
+      return res.status(emailCheck.reason === "provider_not_allowed" ? 422 : 400).json({
+        message: emailCheck.message,
+      });
+    }
+
+    const [existingByEmail, existingByUsername, existingByPhone] = await Promise.all([
+      User.findOne({ email: normalizedEmail }),
+      User.findOne({ username }),
+      phonenumber ? User.findOne({ phonenumber }) : Promise.resolve(null),
+    ]);
 
     if (existingByEmail) {
       return res.status(400).json({ message: "Email is already in use" });
@@ -244,7 +346,7 @@ exports.register = async (req, res) => {
 
     const user = new User({
       username,
-      email,
+      email: normalizedEmail,
       password: hashedPassword,
       phonenumber: phonenumber || undefined,
     });
@@ -275,6 +377,14 @@ exports.register = async (req, res) => {
       });
     }
 
+    if (error?.name === "ValidationError") {
+      const firstError = Object.values(error.errors || {})[0];
+      return res.status(422).json({
+        message: firstError?.message || "Invalid user data",
+        error: error.message,
+      });
+    }
+
     res.status(500).json({
       message: "Registration error",
       error: error.message,
@@ -285,7 +395,8 @@ exports.register = async (req, res) => {
 // LOGIN - Verify credentials and return JWT token
 exports.login = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const email = normalizeEmail(req.body?.email);
+    const password = String(req.body?.password || "");
 
     if (!email || !password) {
       return res.status(400).json({ message: "Email and password required" });
@@ -325,17 +436,25 @@ exports.login = async (req, res) => {
 
 exports.requestPasswordResetCode = async (req, res) => {
   try {
-    const email = normalizeEmail(req.body?.email);
-
-    if (!email) {
+    const rawEmail = String(req.body?.email || "");
+    if (!rawEmail.trim()) {
       return res.status(400).json({ message: "Email is required" });
     }
+
+    const emailCheck = validateTrustedEmail(rawEmail);
+    if (!emailCheck.isValid) {
+      return res.status(emailCheck.reason === "provider_not_allowed" ? 422 : 400).json({
+        message: emailCheck.message,
+      });
+    }
+
+    const email = emailCheck.normalizedEmail;
 
     const user = await User.findOne({ email });
 
     if (!user) {
-      return res.status(200).json({
-        message: "If this email exists, a reset code has been sent.",
+      return res.status(404).json({
+        message: "No account is associated with this email.",
       });
     }
 
@@ -346,21 +465,32 @@ exports.requestPasswordResetCode = async (req, res) => {
     );
     await user.save();
 
-    await sendPasswordResetEmail(email, resetCode);
+    try {
+      await sendPasswordResetEmail(email, resetCode);
+    } catch (sendError) {
+      user.resetPasswordCodeHash = null;
+      user.resetPasswordCodeExpiresAt = null;
+      await user.save();
+      throw sendError;
+    }
 
     res.status(200).json({
-      message: "Verification code sent to your email.",
+      message: "A reset code has been sent to your email.",
     });
   } catch (error) {
     const details = String(error.message || "");
     const timedOut = /timeout|timed out|ETIMEDOUT|ESOCKET/i.test(details);
-
-    res.status(500).json({
+    const responsePayload = {
       message: timedOut
-        ? "Failed to send reset code (SMTP timeout). Check SMTP host/port/security and provider access from your hosting platform."
-        : "Failed to send reset code",
-      error: error.message,
-    });
+        ? "Reset email service is temporarily unavailable. Please try again shortly."
+        : "Failed to send reset code. Please try again later.",
+    };
+
+    if (process.env.NODE_ENV !== "production") {
+      responsePayload.error = error.message;
+    }
+
+    res.status(503).json(responsePayload);
   }
 };
 
@@ -459,16 +589,26 @@ exports.resetPasswordWithCode = async (req, res) => {
 // CREATE - Add a new user
 exports.createUser = async (req, res) => {
   try {
-    const { username, email, password, phonenumber } = req.body;
+    const username = String(req.body?.username || "").trim();
+    const password = String(req.body?.password || "");
+    const phonenumber = String(req.body?.phonenumber || "").trim();
+    const emailCheck = validateTrustedEmail(req.body?.email);
+    const normalizedEmail = emailCheck.normalizedEmail;
 
     // Validation
-    if (!username || !email || !password || !phonenumber) {
+    if (!username || !normalizedEmail || !password || !phonenumber) {
       return res.status(400).json({ message: "All fields are required" });
+    }
+
+    if (!emailCheck.isValid) {
+      return res.status(emailCheck.reason === "provider_not_allowed" ? 422 : 400).json({
+        message: emailCheck.message,
+      });
     }
 
     // Check if user already exists
     const existingUser = await User.findOne({
-      $or: [{ email }, { username }, { phonenumber }],
+      $or: [{ email: normalizedEmail }, { username }, { phonenumber }],
     });
 
     if (existingUser) {
@@ -480,7 +620,7 @@ exports.createUser = async (req, res) => {
     // Create new user (admin-created users are marked verified)
     const user = new User({
       username,
-      email,
+      email: normalizedEmail,
       password: hashedPassword,
       phonenumber,
     });
@@ -543,6 +683,7 @@ exports.updateUser = async (req, res) => {
   try {
     const { id } = req.params;
     const { username, email, phonenumber } = req.body;
+    const normalizedEmail = email ? normalizeEmail(email) : "";
 
     // Check if at least one field is provided
     if (!username && !email && !phonenumber) {
@@ -554,7 +695,15 @@ exports.updateUser = async (req, res) => {
     // Build update object
     const updateData = {};
     if (username) updateData.username = username;
-    if (email) updateData.email = email;
+    if (email) {
+      const emailCheck = validateTrustedEmail(normalizedEmail);
+      if (!emailCheck.isValid) {
+        return res.status(emailCheck.reason === "provider_not_allowed" ? 422 : 400).json({
+          message: emailCheck.message,
+        });
+      }
+      updateData.email = normalizedEmail;
+    }
     if (phonenumber) updateData.phonenumber = phonenumber;
 
     const user = await User.findByIdAndUpdate(id, updateData, {
@@ -583,6 +732,7 @@ exports.updateProfile = async (req, res) => {
   try {
     const userId = req.user.userId;
     const { username, email, phonenumber, currentPassword, newPassword } = req.body;
+    const normalizedIncomingEmail = email ? normalizeEmail(email) : "";
 
     // Check if at least one field is provided
     if (!username && !email && !phonenumber && !newPassword) {
@@ -617,10 +767,20 @@ exports.updateProfile = async (req, res) => {
       if (existing) return res.status(400).json({ message: "Username already taken" });
       user.username = username;
     }
-    if (email && email !== user.email) {
-      const existing = await User.findOne({ email });
+
+    if (email) {
+      const emailCheck = validateTrustedEmail(normalizedIncomingEmail);
+      if (!emailCheck.isValid) {
+        return res.status(emailCheck.reason === "provider_not_allowed" ? 422 : 400).json({
+          message: emailCheck.message,
+        });
+      }
+    }
+
+    if (normalizedIncomingEmail && normalizedIncomingEmail !== normalizeEmail(user.email)) {
+      const existing = await User.findOne({ email: normalizedIncomingEmail });
       if (existing) return res.status(400).json({ message: "Email already in use" });
-      user.email = email;
+      user.email = normalizedIncomingEmail;
     }
     if (phonenumber && phonenumber !== user.phonenumber) {
       const existing = await User.findOne({ phonenumber });
