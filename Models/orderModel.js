@@ -23,6 +23,19 @@ const orderSchema = new mongoose.Schema(
           type: Number,
           required: true,
         },
+        listPrice: {
+          type: Number,
+          default: null,
+        },
+        discountPercentage: {
+          type: Number,
+          default: 0,
+        },
+        marginClass: {
+          type: String,
+          enum: ["low", "medium", "high"],
+          default: undefined,
+        },
         name: {
           type: String,
           required: true,

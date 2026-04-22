@@ -71,24 +71,24 @@ exports.syncProducts = async (req, res) => {
   try {
     const { clearExisting = false, limit = 0 } = req.body;
 
-    console.log("🔄 Starting CodesWholesale product sync...");
+    console.log("Starting CodesWholesale product sync...");
 
     // 1. Fetch all products from CW
     const cwData = await cwService.getProducts();
     let cwProducts = Array.isArray(cwData) ? cwData : (cwData?.items || cwData?.products || []);
 
-    console.log(`📦 Found ${cwProducts.length} products on CodesWholesale`);
+    console.log(`Found ${cwProducts.length} products on CodesWholesale`);
 
     // Optionally limit for testing
     if (limit > 0) {
       cwProducts = cwProducts.slice(0, limit);
-      console.log(`⚙️  Limited to ${cwProducts.length} products`);
+      console.log(`Limited to ${cwProducts.length} products`);
     }
 
     // 2. Optionally clear existing products
     if (clearExisting) {
       await Product.deleteMany({});
-      console.log("🗑️  Cleared existing products");
+      console.log("Cleared existing products");
     }
 
     // 3. Process each product
@@ -144,16 +144,10 @@ exports.syncProducts = async (req, res) => {
       }
     }
 
-    console.log(`   📊 Processed ${cwProducts.length} products`);
+    console.log(`Processed ${cwProducts.length} products`);
 
     // 4. Return summary
     const totalInDb = await Product.countDocuments();
-
-    console.log(`\n✅ Sync complete!`);
-    console.log(`   ✓ Synced: ${successCount}`);
-    console.log(`   ✗ Errors: ${errorCount}`);
-    console.log(`   ⊘ Skipped: ${skippedCount}`);
-    console.log(`   📦 Total in DB: ${totalInDb}`);
 
     res.status(200).json({
       message: "CodesWholesale sync completed",
@@ -167,7 +161,7 @@ exports.syncProducts = async (req, res) => {
       errors: errors.length > 0 ? errors : [],
     });
   } catch (error) {
-    console.error("❌ Sync error:", error);
+    console.error(" Sync error:", error);
     res.status(500).json({
       message: "Error syncing CodesWholesale products",
       error: error.message,

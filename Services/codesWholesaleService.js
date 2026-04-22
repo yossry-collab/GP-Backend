@@ -52,10 +52,10 @@ class CodesWholesaleService {
       this.accessToken = response.data.access_token;
       this.tokenExpiresAt = Date.now() + response.data.expires_in * 1000;
 
-      console.log("✅ CodesWholesale token obtained, expires in", response.data.expires_in, "seconds");
+      console.log("CodesWholesale token obtained, expires in", response.data.expires_in, "seconds");
       return this.accessToken;
     } catch (error) {
-      console.error("❌ CodesWholesale auth error:", error.response?.data || error.message);
+      console.error("CodesWholesale auth error:", error.response?.data || error.message);
       throw new Error("Failed to authenticate with CodesWholesale API");
     }
   }
@@ -86,7 +86,7 @@ class CodesWholesaleService {
         });
         return retry.data;
       }
-      console.error(`❌ CW API GET ${endpoint} error:`, error.response?.data || error.message);
+      console.error(` CW API GET ${endpoint} error:`, error.response?.data || error.message);
       throw error;
     }
   }

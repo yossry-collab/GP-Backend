@@ -9,18 +9,33 @@ const {
   PackOpening,
   Membership,
   LoyaltyConfig,
+  Coupon,
+  AbuseFlag,
 } = require("../Models/loyaltyModel");
 const crypto = require("crypto");
+const Order = require("../Models/orderModel");
+const Product = require("../Models/productModel");
+const User = require("../Models/userModel");
 
 // ═══════════════════════════════════════════════════════
 // ─── HELPERS ─────────────────────────────────────────
 // ═══════════════════════════════════════════════════════
 
 // Get or create loyalty balance for a user
-async function getOrCreateBalance(userId) {
-  let bal = await LoyaltyBalance.findOne({ userId });
+async function getOrCreateBalance(userId, session = null) {
+  let query = LoyaltyBalance.findOne({ userId });
+  if (session) {
+    query = query.session(session);
+  }
+
+  let bal = await query;
   if (!bal) {
-    bal = await LoyaltyBalance.create({ userId, points: 0, lifetimePoints: 0 });
+    if (session) {
+      const created = await LoyaltyBalance.create([{ userId, points: 0, lifetimePoints: 0 }], { session });
+      bal = created[0];
+    } else {
+      bal = await LoyaltyBalance.create({ userId, points: 0, lifetimePoints: 0 });
+    }
   }
   return bal;
 }
@@ -35,6 +50,151 @@ async function getConfig(key, fallback) {
 function getTierMultiplier(tier) {
   const multipliers = { free: 1, silver: 1.25, gold: 1.5, platinum: 2 };
   return multipliers[tier] || 1;
+}
+
+function toNumber(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function startOfUtcDay(date = new Date()) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+}
+
+function startOfUtcMonth(date = new Date()) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
+}
+
+function addDays(date, days) {
+  const next = new Date(date);
+  next.setUTCDate(next.getUTCDate() + days);
+  return next;
+}
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+async function getMembershipByTier(tier) {
+  if (!tier || tier === "free") {
+    return null;
+  }
+  return Membership.findOne({ tier, enabled: true });
+}
+
+async function getDynamicTierMultiplier(tier) {
+  const membership = await getMembershipByTier(tier);
+  if (membership?.pointsMultiplier) {
+    return membership.pointsMultiplier;
+  }
+  return getTierMultiplier(tier);
+}
+
+async function getPackCooldownReductionPercent(tier) {
+  const membership = await getMembershipByTier(tier);
+  return membership?.packCooldownReductionPercent || 0;
+}
+
+async function getBudgetUsageSnapshot() {
+  const monthlyBudget = toNumber(
+    await getConfig("global_monthly_reward_budget_points", 300000),
+    300000
+  );
+  const monthStart = startOfUtcMonth();
+
+  const [{ total = 0 } = {}] = await PointsTransaction.aggregate([
+    {
+      $match: {
+        type: "earn",
+        createdAt: { $gte: monthStart },
+        source: { $nin: ["admin_grant"] },
+      },
+    },
+    { $group: { _id: null, total: { $sum: "$amount" } } },
+  ]);
+
+  return {
+    monthlyBudget,
+    used: total,
+    usageRatio: monthlyBudget > 0 ? total / monthlyBudget : 0,
+  };
+}
+
+async function applyInflationThrottle(amount) {
+  const snapshot = await getBudgetUsageSnapshot();
+  const startRatio = clamp(
+    toNumber(await getConfig("reward_throttle_start_ratio", 0.85), 0.85),
+    0,
+    1
+  );
+  const floorRatio = clamp(
+    toNumber(await getConfig("reward_throttle_floor", 0.45), 0.45),
+    0,
+    1
+  );
+
+  if (snapshot.monthlyBudget <= 0 || amount <= 0) {
+    return { amount, throttleRatio: 1, usageRatio: snapshot.usageRatio };
+  }
+
+  const projectedRatio = (snapshot.used + amount) / snapshot.monthlyBudget;
+  if (projectedRatio <= startRatio) {
+    return { amount, throttleRatio: 1, usageRatio: projectedRatio };
+  }
+
+  const over = projectedRatio - startRatio;
+  const range = Math.max(0.0001, 1 - startRatio);
+  const decay = clamp(over / range, 0, 1);
+  const ratio = clamp(1 - decay * (1 - floorRatio), floorRatio, 1);
+  return {
+    amount: Math.max(0, Math.floor(amount * ratio)),
+    throttleRatio: ratio,
+    usageRatio: projectedRatio,
+  };
+}
+
+async function createAbuseFlag(userId, type, severity, signal, metadata = {}) {
+  try {
+    await AbuseFlag.create({ userId, type, severity, signal, metadata });
+  } catch (_err) {
+    // Best-effort only. Never block loyalty flows due to abuse logging failure.
+  }
+}
+
+async function updateTierFromSignals(balance, session = null) {
+  const totalPackOpens = Object.values(ensurePackProgress(balance)).reduce(
+    (sum, state) => sum + (state.opens || 0),
+    0
+  );
+
+  const weightedScore =
+    (balance.lifetimeSpend || 0) +
+    (balance.engagementScore || 0) * 5 +
+    totalPackOpens * 3;
+
+  const silverThreshold = toNumber(await getConfig("tier_silver_threshold", 250), 250);
+  const goldThreshold = toNumber(await getConfig("tier_gold_threshold", 900), 900);
+  const platinumThreshold = toNumber(await getConfig("tier_platinum_threshold", 2200), 2200);
+
+  let projectedTier = "free";
+  if (weightedScore >= platinumThreshold) {
+    projectedTier = "platinum";
+  } else if (weightedScore >= goldThreshold) {
+    projectedTier = "gold";
+  } else if (weightedScore >= silverThreshold) {
+    projectedTier = "silver";
+  }
+
+  if ((TIER_ORDER[projectedTier] || 0) > (TIER_ORDER[balance.tier] || 0)) {
+    balance.tier = projectedTier;
+    if (session) {
+      await balance.save({ session });
+    } else {
+      await balance.save();
+    }
+  }
+
+  return balance.tier;
 }
 
 const TIER_ORDER = { free: 0, silver: 1, gold: 2, platinum: 3, none: 0 };
@@ -139,6 +299,20 @@ function ensurePackProgress(balance) {
   return balance.packProgress;
 }
 
+function ensurePackCooldowns(balance) {
+  if (!balance.packCooldowns) {
+    balance.packCooldowns = {};
+  }
+
+  for (const packClass of Object.keys(DEFAULT_PACK_PROFILES)) {
+    if (!Object.prototype.hasOwnProperty.call(balance.packCooldowns, packClass)) {
+      balance.packCooldowns[packClass] = null;
+    }
+  }
+
+  return balance.packCooldowns;
+}
+
 function tierAllows(currentTier, requiredTier) {
   if (!requiredTier || requiredTier === "none") return true;
   return (TIER_ORDER[currentTier] || 0) >= (TIER_ORDER[requiredTier] || 0);
@@ -172,14 +346,18 @@ function buildLuckAdjustedWeight(drop, luckMultiplier) {
   return Math.max(0.0001, drop.weight * (rarityBias[drop.rarity] || 1));
 }
 
-function chooseWeightedDrop(drops, luckMultiplier) {
+function chooseWeightedDrop(drops, luckMultiplier, roll = null) {
   const withAdjustedWeights = drops.map((drop) => ({
     drop,
     adjustedWeight: buildLuckAdjustedWeight(drop, luckMultiplier),
   }));
 
   const totalWeight = withAdjustedWeights.reduce((sum, entry) => sum + entry.adjustedWeight, 0);
-  const randomPoint = crypto.randomInt(0, Math.max(1, Math.floor(totalWeight * 1000))) / 1000;
+  const randomRatio =
+    typeof roll === "number"
+      ? clamp(roll, 0, 0.999999999)
+      : crypto.randomInt(0, 1000000) / 1000000;
+  const randomPoint = randomRatio * totalWeight;
 
   let cumulative = 0;
   for (const entry of withAdjustedWeights) {
@@ -238,6 +416,7 @@ function buildPackReveal(pack, selectedDrop, pityState) {
 function buildPackUserState(pack, balance) {
   const packClass = normalizePackClass(pack);
   const progress = ensurePackProgress(balance)[packClass];
+  const cooldowns = ensurePackCooldowns(balance);
   const canOpen = tierAllows(balance.tier, pack.tierRequired) && balance.points >= pack.pointsCost;
 
   let lockReason = null;
@@ -247,8 +426,16 @@ function buildPackUserState(pack, balance) {
     lockReason = `${pack.pointsCost - balance.points} more points needed`;
   }
 
+  const now = Date.now();
+  const cooldownUntil = cooldowns[packClass] ? new Date(cooldowns[packClass]).getTime() : 0;
+  const cooldownSecondsRemaining = cooldownUntil > now ? Math.ceil((cooldownUntil - now) / 1000) : 0;
+
+  if (cooldownSecondsRemaining > 0) {
+    lockReason = `Cooldown active: ${cooldownSecondsRemaining}s remaining`;
+  }
+
   return {
-    canOpen,
+    canOpen: canOpen && cooldownSecondsRemaining === 0,
     lockReason,
     pity: {
       opens: progress.opens,
@@ -257,18 +444,418 @@ function buildPackUserState(pack, balance) {
       remainingToEpic: Math.max(0, (pack.pityEpicThreshold || 0) - progress.withoutEpic),
       remainingToLegendary: Math.max(0, (pack.pityLegendaryThreshold || 0) - progress.withoutLegendary),
     },
+    cooldownSecondsRemaining,
+  };
+}
+
+const DEFAULT_QUEST_CATALOG = [
+  {
+    questKey: "starter_contract_verified",
+    title: "Starter Contract",
+    description: "Verify your account and receive your starter points.",
+    type: "signup_welcome",
+    rewardPoints: 75,
+    icon: "🚀",
+    category: "onboarding",
+    sortOrder: 1,
+    cooldownHours: 0,
+    completionLimit: 1,
+    validationRules: { requireVerifiedEmail: true },
+    metadata: { target: 1 },
+  },
+  {
+    questKey: "invite_friend_link",
+    title: "Invite a Friend",
+    description: "Invite 1 friend with your referral link.",
+    type: "referral_invite",
+    rewardPoints: 180,
+    icon: "🔗",
+    category: "career",
+    sortOrder: 2,
+    cooldownHours: 0,
+    completionLimit: 1,
+    metadata: { targetReferrals: 1, referralPath: "/register" },
+  },
+  {
+    questKey: "profile_setup",
+    title: "Squad Setup",
+    description: "Complete your profile (username, email, and phone).",
+    type: "complete_profile",
+    rewardPoints: 80,
+    icon: "👤",
+    category: "onboarding",
+    sortOrder: 3,
+    cooldownHours: 0,
+    completionLimit: 1,
+  },
+  {
+    questKey: "first_purchase_contract",
+    title: "First Whistle Purchase",
+    description: "Complete your first paid order.",
+    type: "first_purchase",
+    rewardPoints: 120,
+    icon: "🛍️",
+    category: "career",
+    sortOrder: 4,
+    cooldownHours: 0,
+    completionLimit: 1,
+  },
+  {
+    questKey: "seven_day_form",
+    title: "Form Streak",
+    description: "Reach a 7-day login streak.",
+    type: "streak_login",
+    rewardPoints: 140,
+    icon: "🔥",
+    category: "weekly",
+    sortOrder: 5,
+    cooldownHours: 168,
+    completionLimit: 52,
+    metadata: { requiredDays: 7 },
+  },
+  {
+    questKey: "weekly_two_orders",
+    title: "Weekend Warrior",
+    description: "Place 2 paid orders within 7 days.",
+    type: "weekly_orders",
+    rewardPoints: 160,
+    icon: "🧾",
+    category: "weekly",
+    sortOrder: 6,
+    cooldownHours: 168,
+    completionLimit: 52,
+    metadata: { requiredOrders: 2 },
+  },
+  {
+    questKey: "order_milestone_five",
+    title: "League Matches (Total)",
+    description: "Complete 5 paid orders in total.",
+    type: "order_milestone",
+    rewardPoints: 210,
+    icon: "🎯",
+    category: "career",
+    sortOrder: 7,
+    cooldownHours: 0,
+    completionLimit: 1,
+    metadata: { targetOrders: 5 },
+  },
+  {
+    questKey: "pack_open_master",
+    title: "Pack Opener",
+    description: "Open 3 reward packs.",
+    type: "pack_open_total",
+    rewardPoints: 130,
+    icon: "📦",
+    category: "career",
+    sortOrder: 8,
+    cooldownHours: 0,
+    completionLimit: 1,
+    metadata: { targetPacks: 3 },
+  },
+  {
+    questKey: "season_budget_80",
+    title: "Season Budget Boss",
+    description: "Spend 80 EUR in paid orders this month.",
+    type: "monthly_spend",
+    rewardPoints: 250,
+    icon: "💰",
+    category: "seasonal",
+    sortOrder: 9,
+    cooldownHours: 720,
+    completionLimit: 12,
+    metadata: { targetSpend: 80, currency: "EUR" },
+  },
+  {
+    questKey: "reward_redeemer",
+    title: "Reward Collector",
+    description: "Redeem 2 rewards from the shop.",
+    type: "redeem_total",
+    rewardPoints: 140,
+    icon: "🎁",
+    category: "career",
+    sortOrder: 10,
+    cooldownHours: 0,
+    completionLimit: 1,
+    metadata: { targetRedemptions: 2 },
+  },
+  {
+    questKey: "career_points_1500",
+    title: "Grinding Legend",
+    description: "Earn 1500 lifetime points.",
+    type: "points_earned",
+    rewardPoints: 220,
+    icon: "🏅",
+    category: "career",
+    sortOrder: 11,
+    cooldownHours: 0,
+    completionLimit: 1,
+    metadata: { targetPoints: 1500 },
+  },
+  {
+    questKey: "community_follow_soon",
+    title: "Community Scout",
+    description: "Follow our social channels to unlock this objective soon.",
+    type: "social_follow",
+    rewardPoints: 40,
+    icon: "📣",
+    category: "seasonal",
+    featureFlag: false,
+    sortOrder: 12,
+    cooldownHours: 0,
+    completionLimit: 1,
+  },
+];
+
+async function ensureQuestCatalogDefaults() {
+  const defaultKeys = DEFAULT_QUEST_CATALOG.map((quest) => quest.questKey);
+  const existingCount = await Quest.countDocuments({ questKey: { $in: defaultKeys } });
+  if (existingCount >= DEFAULT_QUEST_CATALOG.length) {
+    return;
+  }
+
+  for (const quest of DEFAULT_QUEST_CATALOG) {
+    await Quest.updateOne(
+      { questKey: quest.questKey },
+      { $setOnInsert: { ...quest, enabled: true } },
+      { upsert: true }
+    );
+  }
+}
+
+async function evaluateQuestProgress(quest, userId, balance, userQuest) {
+  const metadata = quest.metadata || {};
+  const validationRules = quest.validationRules || {};
+  const completionLimit = Math.max(1, toNumber(quest.completionLimit, 1));
+  const completionCount = Math.max(0, toNumber(userQuest?.completionCount, 0));
+  const cooldownHours = Math.max(0, toNumber(quest.cooldownHours, 24));
+
+  let current = 0;
+  let target = 1;
+  let blockedReason = null;
+  let sourceAlreadyClaimed = false;
+  let userDoc = null;
+
+  switch (quest.type) {
+    case "signup_welcome": {
+      target = 1;
+      const existingSignup = await PointsTransaction.findOne({ userId, source: "signup" }).select("_id");
+      sourceAlreadyClaimed = !!existingSignup;
+      current = sourceAlreadyClaimed ? 1 : 0;
+      break;
+    }
+    case "first_purchase": {
+      target = Math.max(1, toNumber(metadata.requiredOrders || metadata.target, 1));
+      current = await Order.countDocuments({ userId, status: "completed", paymentStatus: "paid" });
+      break;
+    }
+    case "complete_profile": {
+      target = 1;
+      userDoc = await User.findById(userId).select("username email phonenumber");
+      current = userDoc?.username && userDoc?.email && userDoc?.phonenumber ? 1 : 0;
+      break;
+    }
+    case "streak_login": {
+      target = Math.max(1, toNumber(metadata.requiredDays, 7));
+      current = Math.max(0, toNumber(balance.streakDays, 0));
+      break;
+    }
+    case "weekly_orders": {
+      target = Math.max(1, toNumber(metadata.requiredOrders || metadata.target, 2));
+      const weekStart = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+      current = await Order.countDocuments({
+        userId,
+        status: "completed",
+        paymentStatus: "paid",
+        createdAt: { $gte: weekStart },
+      });
+      break;
+    }
+    case "monthly_spend": {
+      target = Math.max(1, toNumber(metadata.targetSpend || metadata.target, 80));
+      const monthStart = startOfUtcMonth();
+      const monthlyOrders = await Order.find({
+        userId,
+        status: "completed",
+        paymentStatus: "paid",
+        createdAt: { $gte: monthStart },
+      }).select("totalPrice");
+      current = monthlyOrders.reduce((sum, order) => sum + Math.max(0, toNumber(order.totalPrice, 0)), 0);
+      break;
+    }
+    case "points_earned": {
+      target = Math.max(1, toNumber(metadata.targetPoints || metadata.target, 1000));
+      current = Math.max(0, toNumber(balance.lifetimePoints, 0));
+      break;
+    }
+    case "referral_invite": {
+      target = Math.max(1, toNumber(metadata.targetReferrals || metadata.target, 1));
+      current = await PointsTransaction.countDocuments({
+        userId,
+        source: "referral",
+        type: "earn",
+      });
+      break;
+    }
+    case "order_milestone": {
+      target = Math.max(1, toNumber(metadata.targetOrders || metadata.target, 5));
+      current = await Order.countDocuments({
+        userId,
+        status: "completed",
+        paymentStatus: "paid",
+      });
+      break;
+    }
+    case "pack_open_total": {
+      target = Math.max(1, toNumber(metadata.targetPacks || metadata.target, 3));
+      current = await PackOpening.countDocuments({ userId });
+      break;
+    }
+    case "redeem_total": {
+      target = Math.max(1, toNumber(metadata.targetRedemptions || metadata.target, 2));
+      current = await Redemption.countDocuments({ userId, status: "completed" });
+      break;
+    }
+    case "social_follow":
+    case "share_product":
+    case "write_review": {
+      target = 1;
+      current = validationRules.allowManualClaim === true ? 1 : 0;
+      if (!current) {
+        blockedReason = "Objective verification pending";
+      }
+      break;
+    }
+    case "custom":
+    default: {
+      target = Math.max(1, toNumber(metadata.target, 1));
+      current = userQuest?.progress >= 100 ? target : 0;
+      break;
+    }
+  }
+
+  if (quest.featureFlag === false) {
+    blockedReason = blockedReason || "Coming soon";
+  }
+
+  if (validationRules.requireVerifiedEmail) {
+    userDoc = userDoc || (await User.findById(userId).select("emailVerified"));
+    if (!userDoc?.emailVerified) {
+      blockedReason = blockedReason || "Verified email required";
+    }
+  }
+
+  if (validationRules.minimumTier && !tierAllows(balance.tier, validationRules.minimumTier)) {
+    blockedReason = blockedReason || `Requires ${validationRules.minimumTier} tier`;
+  }
+
+  if (
+    validationRules.minimumLifetimeSpend &&
+    (balance.lifetimeSpend || 0) < toNumber(validationRules.minimumLifetimeSpend, 0)
+  ) {
+    blockedReason = blockedReason || "Minimum lifetime spend requirement not met";
+  }
+
+  let nextEligibleAt = null;
+  let cooldownActive = false;
+  if (completionCount > 0 && userQuest?.lastCompletedAt && cooldownHours > 0) {
+    const candidate = new Date(
+      new Date(userQuest.lastCompletedAt).getTime() + cooldownHours * 60 * 60 * 1000
+    );
+    if (candidate > new Date()) {
+      cooldownActive = true;
+      nextEligibleAt = candidate;
+    }
+  }
+
+  const normalizedTarget = Math.max(1, toNumber(target, 1));
+  const normalizedCurrent = Math.max(0, toNumber(current, 0));
+  const progress = clamp(
+    Math.round((Math.min(normalizedCurrent, normalizedTarget) / normalizedTarget) * 100),
+    0,
+    100
+  );
+
+  const requirementMet = normalizedCurrent >= normalizedTarget;
+  const effectiveCompletionCount = sourceAlreadyClaimed
+    ? Math.max(1, completionCount)
+    : completionCount;
+  const limitReached = effectiveCompletionCount >= completionLimit;
+  const completed = limitReached || sourceAlreadyClaimed;
+  const claimable =
+    requirementMet &&
+    !limitReached &&
+    !sourceAlreadyClaimed &&
+    !cooldownActive &&
+    !blockedReason;
+
+  let status = "in_progress";
+  if (completed) {
+    status = "completed";
+  } else if (claimable) {
+    status = "claimable";
+  } else if (cooldownActive) {
+    status = "cooldown";
+  } else if (blockedReason) {
+    status = "locked";
+  }
+
+  if (sourceAlreadyClaimed) {
+    blockedReason = blockedReason || "Welcome reward already claimed";
+  }
+
+  return {
+    current: normalizedCurrent,
+    target: normalizedTarget,
+    progress,
+    claimable,
+    completed,
+    completionCount: effectiveCompletionCount,
+    completionLimit,
+    cooldownActive,
+    nextEligibleAt,
+    blockedReason,
+    status,
+    remaining: Math.max(0, normalizedTarget - normalizedCurrent),
   };
 }
 
 async function ensureAdvancedLoyaltyDefaults() {
   const configDefaults = [
-    { key: "points_per_euro", value: 10, description: "Points earned per €1 spent" },
-    { key: "signup_bonus_points", value: 100, description: "Points awarded on registration" },
+    { key: "points_per_euro", value: 10, description: "Legacy points ratio fallback" },
+    { key: "point_value_eur", value: 0.01, description: "Soft-currency value of 1 point in EUR for ROI controls" },
+    { key: "signup_bonus_points", value: 75, description: "Points awarded on verified registration" },
+    { key: "referral_invite_points", value: 50, description: "Points awarded to inviter when a referred user registers" },
+    { key: "signup_bonus_requires_verified_email", value: true, description: "Require verified email to claim welcome bonus" },
+    { key: "signup_bonus_min_account_age_minutes", value: 10, description: "Cooldown before signup bonus can be claimed" },
     { key: "daily_login_points", value: 10, description: "Base points for daily login" },
+    { key: "margin_rate_low", value: 0.005, description: "Cashback rate for low margin catalog items" },
+    { key: "margin_rate_medium", value: 0.01, description: "Cashback rate for medium margin catalog items" },
+    { key: "margin_rate_high", value: 0.02, description: "Cashback rate for high margin catalog items" },
+    { key: "purchase_points_daily_cap", value: 800, description: "Max purchase-earned points per user per day" },
+    { key: "purchase_points_monthly_cap", value: 12000, description: "Max purchase-earned points per user per month" },
+    { key: "coupon_default_expiry_days", value: 14, description: "Default coupon expiration window" },
+    { key: "coupon_default_min_cart_value", value: 25, description: "Default minimum cart value for loyalty coupons" },
+    { key: "coupon_monthly_redemption_limit", value: 6, description: "Monthly coupon redemptions allowed per user" },
+    { key: "reward_cost_safety_ratio", value: 1.1, description: "Max reward liability allowed versus burned point value" },
+    { key: "pack_open_cooldown_seconds", value: 120, description: "Base cooldown between pack openings" },
+    { key: "daily_pack_open_cap", value: 15, description: "Max number of pack openings per day" },
+    { key: "monthly_pack_open_cap", value: 250, description: "Max number of pack openings per month" },
+    { key: "pack_coupon_utilization_rate", value: 0.6, description: "Expected redemption usage rate of coupon drops" },
+    { key: "max_pack_liability_ratio", value: 2.25, description: "Maximum expected pack liability relative to points burned" },
+    { key: "global_monthly_reward_budget_points", value: 300000, description: "Global reward budget to protect startup cash flow" },
+    { key: "reward_throttle_start_ratio", value: 0.85, description: "Usage ratio where reward throttling begins" },
+    { key: "reward_throttle_floor", value: 0.45, description: "Minimum payout multiplier when throttling is active" },
+    { key: "tier_silver_threshold", value: 250, description: "Weighted score threshold for Silver tier" },
+    { key: "tier_gold_threshold", value: 900, description: "Weighted score threshold for Gold tier" },
+    { key: "tier_platinum_threshold", value: 2200, description: "Weighted score threshold for Platinum tier" },
   ];
 
   for (const config of configDefaults) {
-    await LoyaltyConfig.findOneAndUpdate({ key: config.key }, config, { upsert: true, new: true });
+    await LoyaltyConfig.updateOne(
+      { key: config.key },
+      { $setOnInsert: config },
+      { upsert: true }
+    );
   }
 
   const membershipDefaults = [
@@ -279,6 +866,7 @@ async function ensureAdvancedLoyaltyDefaults() {
       yearlyPrice: 5000,
       pointsMultiplier: 1.25,
       packLuckMultiplier: 1.05,
+      packCooldownReductionPercent: 10,
       monthlyBonusPoints: 120,
       perks: ["1.25x points on purchases", "Access to Silver Packs", "Slightly improved pack luck", "Monthly 120-point bonus"],
     },
@@ -289,6 +877,7 @@ async function ensureAdvancedLoyaltyDefaults() {
       yearlyPrice: 12000,
       pointsMultiplier: 1.5,
       packLuckMultiplier: 1.15,
+      packCooldownReductionPercent: 25,
       monthlyBonusPoints: 300,
       perks: ["1.5x points on purchases", "Access to Gold Packs", "Higher epic and legendary pull rate", "Monthly 300-point bonus"],
     },
@@ -299,55 +888,213 @@ async function ensureAdvancedLoyaltyDefaults() {
       yearlyPrice: 24000,
       pointsMultiplier: 2,
       packLuckMultiplier: 1.3,
+      packCooldownReductionPercent: 45,
       monthlyBonusPoints: 700,
       perks: ["2x points on purchases", "Access to Platinum Packs", "Best pity protection in the game", "Monthly 700-point bonus", "Premium pull flair and top-tier rewards"],
     },
   ];
 
   for (const membership of membershipDefaults) {
-    await Membership.findOneAndUpdate(
+    await Membership.updateOne(
       { tier: membership.tier },
-      { ...membership, enabled: true },
-      { upsert: true, new: true }
+      { $setOnInsert: { ...membership, enabled: true } },
+      { upsert: true }
     );
   }
 
   for (const [packClass, profile] of Object.entries(DEFAULT_PACK_PROFILES)) {
-    await Pack.findOneAndUpdate(
+    await Pack.updateOne(
       { packClass },
-      { ...profile, packClass, enabled: true },
-      { upsert: true, new: true }
+      { $setOnInsert: { ...profile, packClass, enabled: true } },
+      { upsert: true }
     );
   }
 }
 
 // Add points transaction and update balance
-async function addPoints(userId, amount, type, source, description, metadata = {}) {
-  const bal = await getOrCreateBalance(userId);
-  const multiplier = type === "earn" ? getTierMultiplier(bal.tier) : 1;
-  const finalAmount = type === "earn" ? Math.round(amount * multiplier) : amount;
+async function addPoints(userId, amount, type, source, description, metadata = {}, options = {}) {
+  const {
+    skipTierMultiplier = false,
+    bypassInflationControls = false,
+    idempotencyKey = null,
+    economyCostEstimate = 0,
+    session = null,
+  } = options;
+
+  if (idempotencyKey) {
+    let existingQuery = PointsTransaction.findOne({ idempotencyKey });
+    if (session) {
+      existingQuery = existingQuery.session(session);
+    }
+    const existing = await existingQuery;
+    if (existing) {
+      const bal = await getOrCreateBalance(userId, session);
+      return { balance: bal, transaction: existing, alreadyProcessed: true, throttleRatio: 1 };
+    }
+  }
+
+  const bal = await getOrCreateBalance(userId, session);
+  let finalAmount = toNumber(amount, 0);
+
+  if (type === "earn" && !skipTierMultiplier) {
+    const multiplier = await getDynamicTierMultiplier(bal.tier);
+    finalAmount = Math.round(finalAmount * multiplier);
+  }
+
+  let throttleRatio = 1;
+  if (type === "earn" && !bypassInflationControls) {
+    const throttle = await applyInflationThrottle(finalAmount);
+    finalAmount = throttle.amount;
+    throttleRatio = throttle.throttleRatio;
+  }
+
+  if (!Number.isFinite(finalAmount)) {
+    throw new Error("Invalid points amount");
+  }
 
   bal.points += finalAmount;
-  if (finalAmount > 0) bal.lifetimePoints += finalAmount;
-  if (bal.points < 0) bal.points = 0;
-  await bal.save();
+  if (finalAmount > 0) {
+    bal.lifetimePoints += finalAmount;
+  }
+  if (bal.points < 0) {
+    bal.points = 0;
+  }
 
-  const tx = await PointsTransaction.create({
+  if (session) {
+    await bal.save({ session });
+  } else {
+    await bal.save();
+  }
+
+  const txPayload = {
     userId,
     type,
     amount: finalAmount,
     balance: bal.points,
     source,
     description,
-    metadata,
-  });
+    metadata: {
+      ...metadata,
+      throttleRatio,
+    },
+    idempotencyKey,
+    economyCostEstimate,
+  };
 
-  return { balance: bal, transaction: tx };
+  let tx;
+  if (session) {
+    const created = await PointsTransaction.create([txPayload], { session });
+    tx = created[0];
+  } else {
+    tx = await PointsTransaction.create(txPayload);
+  }
+
+  return { balance: bal, transaction: tx, throttleRatio };
 }
 
 // Generate a unique coupon code
 function generateCouponCode() {
   return "GP-" + crypto.randomBytes(4).toString("hex").toUpperCase();
+}
+
+function buildSecureRoll(context = "") {
+  const nonce = crypto.randomBytes(16).toString("hex");
+  const hash = crypto
+    .createHash("sha256")
+    .update(`${nonce}:${context}:${Date.now()}`)
+    .digest("hex");
+
+  const numerator = Number.parseInt(hash.slice(0, 13), 16);
+  const denominator = 0x1fffffffffffff;
+  const roll = denominator > 0 ? clamp(numerator / denominator, 0, 0.999999999) : 0.5;
+  return { nonce, hash, roll };
+}
+
+function inferMarginClass(productDoc, item) {
+  const raw = String(productDoc?.marginClass || item?.marginClass || "").toLowerCase();
+  if (["low", "medium", "high"].includes(raw)) {
+    return raw;
+  }
+
+  const category = String(item?.category || productDoc?.category || "").toLowerCase();
+  if (category === "gift-card") return "low";
+  if (category === "software") return "high";
+  return "medium";
+}
+
+async function getMarginRateByClass(marginClass) {
+  if (marginClass === "low") {
+    return toNumber(await getConfig("margin_rate_low", 0.005), 0.005);
+  }
+  if (marginClass === "high") {
+    return toNumber(await getConfig("margin_rate_high", 0.02), 0.02);
+  }
+  return toNumber(await getConfig("margin_rate_medium", 0.01), 0.01);
+}
+
+async function estimateRewardCostEuro(reward) {
+  const defaultMinCart = toNumber(await getConfig("coupon_default_min_cart_value", 25), 25);
+  const utilizationRate = clamp(
+    toNumber(await getConfig("pack_coupon_utilization_rate", 0.6), 0.6),
+    0.05,
+    1
+  );
+
+  if (reward.type === "gift_card") {
+    return Math.max(0, toNumber(reward.discountAmount, 0));
+  }
+
+  if (reward.type === "coupon") {
+    const baseCart = Math.max(toNumber(reward.minimumCartValue, 0), defaultMinCart);
+    const byPercent = (baseCart * Math.max(0, toNumber(reward.discountPercent, 0))) / 100;
+    const byAmount = Math.max(0, toNumber(reward.discountAmount, 0));
+    return Math.max(byPercent, byAmount) * utilizationRate;
+  }
+
+  return 0;
+}
+
+async function estimateDropLiabilityEuro(drop) {
+  const pointValueEur = toNumber(await getConfig("point_value_eur", 0.01), 0.01);
+  const utilizationRate = clamp(
+    toNumber(await getConfig("pack_coupon_utilization_rate", 0.6), 0.6),
+    0.05,
+    1
+  );
+
+  if (drop.type === "points") {
+    return Math.max(0, toNumber(drop.pointsAmount, 0)) * pointValueEur;
+  }
+
+  if (drop.type === "gift_card") {
+    return Math.max(0, toNumber(drop.discountAmount, 0));
+  }
+
+  if (drop.type === "coupon") {
+    const safeBaseCart = 30;
+    const byPercent = (safeBaseCart * Math.max(0, toNumber(drop.discountPercent, 0))) / 100;
+    const byAmount = Math.max(0, toNumber(drop.discountAmount, 0));
+    return Math.max(byPercent, byAmount) * utilizationRate;
+  }
+
+  return 0;
+}
+
+async function estimatePackExpectedLiabilityEuro(pack) {
+  const totalWeight = (pack.drops || []).reduce((sum, drop) => sum + Math.max(0, toNumber(drop.weight, 0)), 0);
+  if (totalWeight <= 0) {
+    return 0;
+  }
+
+  let expected = 0;
+  for (const drop of pack.drops || []) {
+    const weight = Math.max(0, toNumber(drop.weight, 0));
+    if (weight <= 0) continue;
+    const dropLiability = await estimateDropLiabilityEuro(drop);
+    expected += (weight / totalWeight) * dropLiability;
+  }
+
+  return expected;
 }
 
 // ═══════════════════════════════════════════════════════
@@ -361,6 +1108,8 @@ exports.getBalance = async (req, res) => {
     res.json({
       points: bal.points,
       lifetimePoints: bal.lifetimePoints,
+      lifetimeSpend: bal.lifetimeSpend || 0,
+      engagementScore: bal.engagementScore || 0,
       tier: bal.tier,
       streakDays: bal.streakDays,
     });
@@ -426,6 +1175,7 @@ exports.dailyLogin = async (req, res) => {
       `Daily login (Day ${bal.streakDays} streak)`,
       { streakDays: bal.streakDays }
     );
+    const awardedPoints = result.transaction.amount;
 
     // Notify user about daily login points
     const { createNotification } = require("./notificationController");
@@ -433,109 +1183,446 @@ exports.dailyLogin = async (req, res) => {
       req.user.userId,
       "loyalty_points",
       "Daily Login Reward",
-      `+${totalPoints} points! Day ${bal.streakDays} streak bonus.`,
-      { points: totalPoints, streakDays: bal.streakDays }
+      `+${awardedPoints} points! Day ${bal.streakDays} streak bonus.`,
+      { points: awardedPoints, streakDays: bal.streakDays }
     );
 
     res.json({
-      points: totalPoints,
+      points: awardedPoints,
       streakDays: bal.streakDays,
       newBalance: result.balance.points,
-      message: `+${totalPoints} points! (${bal.streakDays} day streak)`,
+      message: `+${awardedPoints} points! (${bal.streakDays} day streak)`,
     });
   } catch (err) {
     res.status(500).json({ message: "Error claiming daily login", error: err.message });
   }
 };
 
-// POST /api/loyalty/earn-purchase — Award points for a purchase (called internally or by order controller)
-exports.earnFromPurchase = async (req, res) => {
-  try {
-    const { orderId, amount } = req.body;
-    if (!orderId || !amount) {
-      return res.status(400).json({ message: "orderId and amount required" });
-    }
+async function getUserEarnedPointsInWindow(userId, source, fromDate) {
+  const [{ total = 0 } = {}] = await PointsTransaction.aggregate([
+    {
+      $match: {
+        userId,
+        type: "earn",
+        source,
+        createdAt: { $gte: fromDate },
+      },
+    },
+    { $group: { _id: null, total: { $sum: "$amount" } } },
+  ]);
+  return total;
+}
 
-    // Check if already awarded for this order
-    const existing = await PointsTransaction.findOne({
-      userId: req.user.userId,
-      source: "purchase",
-      "metadata.orderId": orderId,
-    });
-    if (existing) {
-      return res.status(400).json({ message: "Points already awarded for this order" });
-    }
-
-    const ratio = await getConfig("points_per_euro", 10);
-    const points = Math.round(amount * ratio);
-
-    const result = await addPoints(
-      req.user.userId,
-      points,
-      "earn",
-      "purchase",
-      `Purchase reward (€${amount.toFixed(2)})`,
-      { orderId }
-    );
-
-    // Notify user about purchase points
-    const { createNotification: notify } = require("./notificationController");
-    await notify(
-      req.user.userId,
-      "loyalty_points",
-      "Points Earned!",
-      `You earned ${points} points from your purchase of $${amount.toFixed(2)}.`,
-      { points, orderId }
-    );
-
-    res.json({
-      earned: result.transaction.amount,
-      newBalance: result.balance.points,
-    });
-  } catch (err) {
-    res.status(500).json({ message: "Error earning points", error: err.message });
+// Internal helper used by payment finalization to award purchase points.
+const awardPurchasePointsForOrder = async ({ userId, orderId, amount }) => {
+  if (!userId || !orderId) {
+    throw new Error("userId and orderId required");
   }
+
+  const normalizedOrderId = String(orderId);
+  const existing = await PointsTransaction.findOne({
+    userId,
+    source: "purchase",
+    "metadata.orderId": normalizedOrderId,
+  });
+
+  if (existing) {
+    return {
+      alreadyAwarded: true,
+      earned: 0,
+      newBalance: existing.balance,
+      reason: "already-awarded",
+    };
+  }
+
+  const order = await Order.findById(orderId).lean();
+  if (!order) {
+    throw new Error("Order not found");
+  }
+  if (String(order.userId) !== String(userId)) {
+    throw new Error("Order does not belong to user");
+  }
+  if (order.paymentStatus !== "paid" && order.status !== "completed") {
+    throw new Error("Order must be paid/completed before awarding points");
+  }
+
+  const fallbackAmount = toNumber(amount, 0);
+  const pointValueEur = toNumber(await getConfig("point_value_eur", 0.01), 0.01);
+  const marginRates = {
+    low: await getMarginRateByClass("low"),
+    medium: await getMarginRateByClass("medium"),
+    high: await getMarginRateByClass("high"),
+  };
+
+  const productIds = (order.items || []).map((item) => item.productId).filter(Boolean);
+  const products = await Product.find({ _id: { $in: productIds } })
+    .select("_id discountPercentage category marginClass")
+    .lean();
+  const productMap = new Map(products.map((p) => [String(p._id), p]));
+
+  let eligibleSpend = 0;
+  let discountedSpend = 0;
+  let rawPoints = 0;
+  const breakdown = [];
+
+  for (const item of order.items || []) {
+    const quantity = Math.max(1, toNumber(item.quantity, 1));
+    const lineSpend = Math.max(0, toNumber(item.price, 0) * quantity);
+    const productDoc = productMap.get(String(item.productId));
+
+    const hasDiscount =
+      toNumber(productDoc?.discountPercentage, 0) > 0 ||
+      (toNumber(item.listPrice, 0) > 0 && toNumber(item.price, 0) < toNumber(item.listPrice, 0));
+
+    if (hasDiscount) {
+      discountedSpend += lineSpend;
+      continue;
+    }
+
+    const marginClass = inferMarginClass(productDoc, item);
+    const cashbackRate = marginRates[marginClass] || marginRates.medium;
+    const linePoints = (lineSpend * cashbackRate) / pointValueEur;
+
+    eligibleSpend += lineSpend;
+    rawPoints += linePoints;
+    breakdown.push({
+      productId: item.productId,
+      category: item.category,
+      marginClass,
+      cashbackRate,
+      lineSpend,
+      linePoints: Math.floor(linePoints),
+    });
+  }
+
+  if (eligibleSpend <= 0 && fallbackAmount > 0) {
+    const fallbackPoints = (fallbackAmount * marginRates.medium) / pointValueEur;
+    eligibleSpend = fallbackAmount;
+    rawPoints = fallbackPoints;
+    breakdown.push({
+      category: "fallback",
+      marginClass: "medium",
+      cashbackRate: marginRates.medium,
+      lineSpend: fallbackAmount,
+      linePoints: Math.floor(fallbackPoints),
+    });
+  }
+
+  const calculatedPoints = Math.max(0, Math.floor(rawPoints));
+  if (calculatedPoints <= 0) {
+    return {
+      alreadyAwarded: false,
+      earned: 0,
+      newBalance: (await getOrCreateBalance(userId)).points,
+      reason: "no-eligible-spend",
+    };
+  }
+
+  const tierMultiplier = await getDynamicTierMultiplier((await getOrCreateBalance(userId)).tier);
+  const boostedPoints = Math.max(0, Math.floor(calculatedPoints * tierMultiplier));
+
+  const [dailyCap, monthlyCap, dailyEarned, monthlyEarned] = await Promise.all([
+    toNumber(await getConfig("purchase_points_daily_cap", 800), 800),
+    toNumber(await getConfig("purchase_points_monthly_cap", 12000), 12000),
+    getUserEarnedPointsInWindow(userId, "purchase", startOfUtcDay()),
+    getUserEarnedPointsInWindow(userId, "purchase", startOfUtcMonth()),
+  ]);
+
+  const dailyRemaining = Math.max(0, dailyCap - dailyEarned);
+  const monthlyRemaining = Math.max(0, monthlyCap - monthlyEarned);
+  const finalAward = Math.max(0, Math.min(boostedPoints, dailyRemaining, monthlyRemaining));
+
+  if (boostedPoints > dailyCap * 1.5) {
+    await createAbuseFlag(
+      userId,
+      "points_inflation_risk",
+      "medium",
+      "Unusually large raw purchase points attempt",
+      { orderId: normalizedOrderId, calculatedPoints: boostedPoints, dailyCap }
+    );
+  }
+
+  if (finalAward <= 0) {
+    return {
+      alreadyAwarded: false,
+      earned: 0,
+      newBalance: (await getOrCreateBalance(userId)).points,
+      reason: "cap-reached",
+      caps: {
+        dailyCap,
+        monthlyCap,
+        dailyEarned,
+        monthlyEarned,
+      },
+    };
+  }
+
+  const result = await addPoints(
+    userId,
+    finalAward,
+    "earn",
+    "purchase",
+    `Purchase reward (€${eligibleSpend.toFixed(2)} eligible spend)`,
+    {
+      orderId: normalizedOrderId,
+      eligibleSpend,
+      discountedSpend,
+      breakdown,
+      capReduction: boostedPoints - finalAward,
+      basePoints: calculatedPoints,
+      tierMultiplier,
+    },
+    {
+      idempotencyKey: `purchase:${normalizedOrderId}`,
+      economyCostEstimate: finalAward * pointValueEur,
+      skipTierMultiplier: true,
+    }
+  );
+
+  result.balance.lifetimeSpend = (result.balance.lifetimeSpend || 0) + eligibleSpend;
+  result.balance.engagementScore = (result.balance.engagementScore || 0) + Math.min(30, Math.round(eligibleSpend / 8));
+  await updateTierFromSignals(result.balance);
+  await result.balance.save();
+
+  const { createNotification: notify } = require("./notificationController");
+  await notify(
+    userId,
+    "loyalty_points",
+    "Points Earned!",
+    `You earned ${result.transaction.amount} points from your purchase.`,
+    {
+      points: result.transaction.amount,
+      orderId: normalizedOrderId,
+      eligibleSpend,
+    }
+  );
+
+  return {
+    alreadyAwarded: false,
+    earned: result.transaction.amount,
+    newBalance: result.balance.points,
+    eligibleSpend,
+    discountedSpend,
+  };
 };
+
+const revokePurchasePointsForOrder = async ({ userId, orderId, reason = "Order refund adjustment" }) => {
+  if (!userId || !orderId) {
+    throw new Error("userId and orderId required");
+  }
+
+  const normalizedOrderId = String(orderId);
+  const awardedTx = await PointsTransaction.findOne({
+    userId,
+    source: "purchase",
+    "metadata.orderId": normalizedOrderId,
+  }).sort({ createdAt: -1 });
+
+  if (!awardedTx || awardedTx.amount <= 0) {
+    return { reversed: false, amount: 0, reason: "no-awarded-points" };
+  }
+
+  const existingRefund = await PointsTransaction.findOne({
+    source: "refund",
+    "metadata.refundOfTransactionId": String(awardedTx._id),
+  });
+
+  if (existingRefund) {
+    return { reversed: false, amount: 0, reason: "already-reversed", newBalance: existingRefund.balance };
+  }
+
+  const pointValueEur = toNumber(await getConfig("point_value_eur", 0.01), 0.01);
+  const result = await addPoints(
+    userId,
+    -Math.abs(awardedTx.amount),
+    "refund",
+    "refund",
+    reason,
+    {
+      orderId: normalizedOrderId,
+      refundOfTransactionId: String(awardedTx._id),
+    },
+    {
+      idempotencyKey: `refund:${normalizedOrderId}:${awardedTx._id}`,
+      skipTierMultiplier: true,
+      bypassInflationControls: true,
+      economyCostEstimate: Math.abs(awardedTx.amount) * pointValueEur,
+    }
+  );
+
+  return {
+    reversed: true,
+    amount: Math.abs(result.transaction.amount),
+    newBalance: result.balance.points,
+  };
+};
+
+exports.awardPurchasePointsForOrder = awardPurchasePointsForOrder;
+exports.revokePurchasePointsForOrder = revokePurchasePointsForOrder;
+
+function createHttpError(status, message, meta = {}) {
+  const err = new Error(message);
+  err.status = status;
+  err.meta = meta;
+  return err;
+}
+
+async function grantSignupBonus(userId) {
+  const existing = await PointsTransaction.findOne({
+    userId,
+    source: "signup",
+  });
+  if (existing) {
+    throw createHttpError(400, "Signup bonus already claimed");
+  }
+
+  const user = await User.findById(userId);
+  if (!user) {
+    throw createHttpError(404, "User not found");
+  }
+
+  const requireVerifiedEmail = !!(await getConfig(
+    "signup_bonus_requires_verified_email",
+    true
+  ));
+  if (requireVerifiedEmail && user.emailVerified !== true) {
+    await createAbuseFlag(
+      userId,
+      "signup_bonus_risk",
+      "low",
+      "Signup bonus requested without verified email",
+      { email: user.email }
+    );
+    throw createHttpError(403, "Email verification is required before claiming welcome points");
+  }
+
+  const minAgeMinutes = toNumber(
+    await getConfig("signup_bonus_min_account_age_minutes", 10),
+    10
+  );
+  const accountAgeMinutes = (Date.now() - new Date(user.createdAt).getTime()) / 60000;
+  if (accountAgeMinutes < minAgeMinutes) {
+    throw createHttpError(
+      429,
+      `Please wait ${Math.ceil(minAgeMinutes - accountAgeMinutes)} minute(s) before claiming your welcome bonus`
+    );
+  }
+
+  if (user.phonenumber) {
+    const samePhoneCount = await User.countDocuments({
+      phonenumber: user.phonenumber,
+      _id: { $ne: userId },
+    });
+    if (samePhoneCount > 0) {
+      await createAbuseFlag(
+        userId,
+        "signup_bonus_risk",
+        "high",
+        "Duplicate phone detected during signup bonus claim",
+        { phonenumber: user.phonenumber, samePhoneCount }
+      );
+      throw createHttpError(403, "Signup bonus blocked due to account verification risk");
+    }
+  }
+
+  const bonus = toNumber(await getConfig("signup_bonus_points", 75), 75);
+  const pointValueEur = toNumber(await getConfig("point_value_eur", 0.01), 0.01);
+  const result = await addPoints(
+    userId,
+    bonus,
+    "earn",
+    "signup",
+    "Welcome bonus for joining Game Plug!",
+    {
+      emailVerified: user.emailVerified === true,
+    },
+    {
+      idempotencyKey: `signup:${userId}`,
+      economyCostEstimate: bonus * pointValueEur,
+    }
+  );
+
+  return {
+    user,
+    result,
+  };
+}
+
+async function awardReferralInviteBonus(referrerUserId, invitedUser, options = {}) {
+  if (!referrerUserId || !invitedUser?._id) {
+    return { awarded: false, reason: "invalid_payload" };
+  }
+
+  const normalizedReferrerId = String(referrerUserId);
+  const invitedUserId = String(invitedUser._id);
+  if (normalizedReferrerId === invitedUserId) {
+    return { awarded: false, reason: "self_referral" };
+  }
+
+  const referrer = await User.findById(referrerUserId).select("_id");
+  if (!referrer) {
+    return { awarded: false, reason: "referrer_not_found" };
+  }
+
+  const bonus = toNumber(await getConfig("referral_invite_points", 50), 50);
+  const pointValueEur = toNumber(await getConfig("point_value_eur", 0.01), 0.01);
+  const idempotencyKey =
+    options.idempotencyKey || `referral:${normalizedReferrerId}:${invitedUserId}`;
+
+  const result = await addPoints(
+    referrerUserId,
+    bonus,
+    "earn",
+    "referral",
+    "Referral bonus for inviting a new member",
+    {
+      invitedUserId,
+      invitedUsername: invitedUser.username || "",
+      invitedEmail: invitedUser.email || "",
+    },
+    {
+      idempotencyKey,
+      economyCostEstimate: bonus * pointValueEur,
+    }
+  );
+
+  return {
+    awarded: !result.alreadyProcessed,
+    alreadyProcessed: !!result.alreadyProcessed,
+    result,
+  };
+}
 
 // POST /api/loyalty/signup-bonus — One-time signup bonus
 exports.signupBonus = async (req, res) => {
   try {
-    const existing = await PointsTransaction.findOne({
-      userId: req.user.userId,
-      source: "signup",
-    });
-    if (existing) {
-      return res.status(400).json({ message: "Signup bonus already claimed" });
-    }
-
-    const bonus = await getConfig("signup_bonus_points", 100);
-    const result = await addPoints(
-      req.user.userId,
-      bonus,
-      "earn",
-      "signup",
-      "Welcome bonus for joining Game Plug!"
-    );
+    const userId = req.user.userId;
+    const { result } = await grantSignupBonus(userId);
 
     res.json({
-      earned: bonus,
+      earned: result.transaction.amount,
       newBalance: result.balance.points,
-      message: `Welcome! You earned ${bonus} bonus points!`,
+      message: `Welcome! You earned ${result.transaction.amount} bonus points!`,
     });
 
     // Notify user about signup bonus (fire-and-forget after response)
     const { createNotification: notifyUser } = require("./notificationController");
     notifyUser(
-      req.user.userId,
+      userId,
       "welcome",
       "Welcome to Game Plug!",
-      `You received ${bonus} bonus points for signing up. Start exploring!`,
-      { points: bonus }
+      `You received ${result.transaction.amount} bonus points for signing up. Start exploring!`,
+      { points: result.transaction.amount }
     );
   } catch (err) {
+    if (err.status) {
+      return res.status(err.status).json({ message: err.message, ...(err.meta || {}) });
+    }
     res.status(500).json({ message: "Error granting signup bonus", error: err.message });
   }
 };
+
+exports.awardReferralInviteBonus = awardReferralInviteBonus;
 
 // ═══════════════════════════════════════════════════════
 // ─── 2. REWARDS & REDEMPTION ────────────────────────
@@ -544,8 +1631,27 @@ exports.signupBonus = async (req, res) => {
 // GET /api/loyalty/rewards — List available rewards
 exports.getRewards = async (req, res) => {
   try {
+    const pointValueEur = toNumber(await getConfig("point_value_eur", 0.01), 0.01);
+    const safetyRatio = toNumber(await getConfig("reward_cost_safety_ratio", 1.1), 1.1);
     const rewards = await Reward.find({ enabled: true }).sort({ pointsCost: 1 });
-    res.json(rewards);
+
+    const enriched = await Promise.all(
+      rewards.map(async (reward) => {
+        const estimatedCostEuro = await estimateRewardCostEuro(reward);
+        const burnedPointValueEuro = reward.pointsCost * pointValueEur;
+        return {
+          ...reward.toObject(),
+          economyPreview: {
+            estimatedCostEuro,
+            burnedPointValueEuro,
+            safetyRatio,
+            isSafe: estimatedCostEuro <= burnedPointValueEuro * safetyRatio,
+          },
+        };
+      })
+    );
+
+    res.json(enriched);
   } catch (err) {
     res.status(500).json({ message: "Error fetching rewards", error: err.message });
   }
@@ -553,72 +1659,176 @@ exports.getRewards = async (req, res) => {
 
 // POST /api/loyalty/rewards/:id/redeem — Redeem a reward
 exports.redeemReward = async (req, res) => {
+  const session = await Reward.startSession();
   try {
-    const reward = await Reward.findById(req.params.id);
-    if (!reward || !reward.enabled) {
-      return res.status(404).json({ message: "Reward not found or disabled" });
-    }
+    let payload = null;
 
-    const bal = await getOrCreateBalance(req.user.userId);
+    await session.withTransaction(async () => {
+      const reward = await Reward.findById(req.params.id).session(session);
+      if (!reward || !reward.enabled) {
+        throw new Error("Reward not found or disabled");
+      }
 
-    // Check tier requirement
-    if (!tierAllows(bal.tier, reward.tierRequired)) {
-      return res.status(403).json({ message: `Requires ${reward.tierRequired} tier or higher` });
-    }
+      const bal = await getOrCreateBalance(req.user.userId, session);
 
-    // Check points
-    if (bal.points < reward.pointsCost) {
-      return res.status(400).json({
-        message: "Not enough points",
-        required: reward.pointsCost,
-        current: bal.points,
-      });
-    }
+      if (!tierAllows(bal.tier, reward.tierRequired)) {
+        throw new Error(`Requires ${reward.tierRequired} tier or higher`);
+      }
 
-    // Check stock
-    if (reward.stock !== -1 && reward.stock <= 0) {
-      return res.status(400).json({ message: "Reward out of stock" });
-    }
+      if (bal.points < reward.pointsCost) {
+        throw new Error("Not enough points");
+      }
 
-    // Deduct points
-    const result = await addPoints(
-      req.user.userId,
-      -reward.pointsCost,
-      "spend",
-      "redeem_reward",
-      `Redeemed: ${reward.name}`,
-      { rewardId: reward._id }
-    );
+      if (reward.stock !== -1 && reward.stock <= 0) {
+        throw new Error("Reward out of stock");
+      }
 
-    // Reduce stock
-    if (reward.stock !== -1) {
-      reward.stock -= 1;
-      await reward.save();
-    }
+      const monthStart = startOfUtcMonth();
+      const userMonthlyLimit = Math.max(
+        1,
+        toNumber(
+          reward.monthlyRedemptionLimitPerUser,
+          await getConfig("coupon_monthly_redemption_limit", 6)
+        )
+      );
 
-    // Generate coupon code if applicable
-    let couponCode = null;
-    if (reward.type === "coupon" || reward.type === "gift_card") {
-      couponCode = generateCouponCode();
-    }
+      const userMonthlyRedemptions = await Redemption.countDocuments({
+        userId: req.user.userId,
+        rewardId: reward._id,
+        status: "completed",
+        createdAt: { $gte: monthStart },
+      }).session(session);
 
-    // Log redemption
-    const redemption = await Redemption.create({
-      userId: req.user.userId,
-      rewardId: reward._id,
-      pointsSpent: reward.pointsCost,
-      couponCode,
-      metadata: { rewardName: reward.name, rewardType: reward.type },
+      if (userMonthlyRedemptions >= userMonthlyLimit) {
+        throw new Error("Monthly redemption limit reached for this reward");
+      }
+
+      if (toNumber(reward.maxGlobalRedemptionsPerMonth, -1) > 0) {
+        const globalMonthlyRedemptions = await Redemption.countDocuments({
+          rewardId: reward._id,
+          status: "completed",
+          createdAt: { $gte: monthStart },
+        }).session(session);
+
+        if (globalMonthlyRedemptions >= reward.maxGlobalRedemptionsPerMonth) {
+          throw new Error("This reward reached its global monthly limit");
+        }
+      }
+
+      const pointValueEur = toNumber(await getConfig("point_value_eur", 0.01), 0.01);
+      const safetyRatio = toNumber(await getConfig("reward_cost_safety_ratio", 1.1), 1.1);
+      const burnedPointValueEuro = reward.pointsCost * pointValueEur;
+      const estimatedRewardCostEuro = await estimateRewardCostEuro(reward);
+
+      if (estimatedRewardCostEuro > burnedPointValueEuro * safetyRatio) {
+        throw new Error("Reward temporarily unavailable due to economy protection");
+      }
+
+      const result = await addPoints(
+        req.user.userId,
+        -reward.pointsCost,
+        "spend",
+        "redeem_reward",
+        `Redeemed: ${reward.name}`,
+        { rewardId: reward._id },
+        {
+          idempotencyKey: `redeem:${req.user.userId}:${reward._id}:${Date.now()}`,
+          session,
+          economyCostEstimate: estimatedRewardCostEuro,
+        }
+      );
+
+      if (reward.stock !== -1) {
+        reward.stock -= 1;
+        await reward.save({ session });
+      }
+
+      let coupon = null;
+      let couponCode = null;
+
+      if (reward.type === "coupon" || reward.type === "gift_card") {
+        const couponExpiresDays = Math.max(
+          1,
+          toNumber(reward.couponExpiresDays, await getConfig("coupon_default_expiry_days", 14))
+        );
+        const minCartValue = Math.max(
+          toNumber(reward.minimumCartValue, 0),
+          toNumber(await getConfig("coupon_default_min_cart_value", 25), 25)
+        );
+        couponCode = generateCouponCode();
+
+        const createdCoupons = await Coupon.create(
+          [
+            {
+              code: couponCode,
+              userId: req.user.userId,
+              rewardId: reward._id,
+              source: "reward",
+              discountPercent: toNumber(reward.discountPercent, 0),
+              discountAmount: toNumber(reward.discountAmount, 0),
+              minimumCartValue: minCartValue,
+              expiresAt: addDays(new Date(), couponExpiresDays),
+              metadata: {
+                oneCouponPerOrder: true,
+              },
+            },
+          ],
+          { session }
+        );
+        coupon = createdCoupons[0];
+      }
+
+      const createdRedemptions = await Redemption.create(
+        [
+          {
+            userId: req.user.userId,
+            rewardId: reward._id,
+            pointsSpent: reward.pointsCost,
+            couponCode,
+            metadata: {
+              rewardName: reward.name,
+              rewardType: reward.type,
+              couponId: coupon?._id || null,
+            },
+          },
+        ],
+        { session }
+      );
+
+      payload = {
+        message: `Successfully redeemed: ${reward.name}`,
+        redemption: createdRedemptions[0],
+        coupon,
+        couponCode,
+        newBalance: result.balance.points,
+      };
     });
 
-    res.json({
-      message: `Successfully redeemed: ${reward.name}`,
-      redemption,
-      couponCode,
-      newBalance: result.balance.points,
-    });
+    res.json(payload);
   } catch (err) {
+    if (
+      err.message.includes("not found") ||
+      err.message.includes("disabled")
+    ) {
+      return res.status(404).json({ message: err.message });
+    }
+
+    if (
+      err.message.includes("Not enough points") ||
+      err.message.includes("limit") ||
+      err.message.includes("economy protection") ||
+      err.message.includes("out of stock")
+    ) {
+      return res.status(400).json({ message: err.message });
+    }
+
+    if (err.message.includes("Requires")) {
+      return res.status(403).json({ message: err.message });
+    }
+
     res.status(500).json({ message: "Error redeeming reward", error: err.message });
+  } finally {
+    await session.endSession();
   }
 };
 
@@ -641,21 +1851,43 @@ exports.getRedemptions = async (req, res) => {
 // GET /api/loyalty/quests — Get all quests with user progress
 exports.getQuests = async (req, res) => {
   try {
+    await ensureQuestCatalogDefaults();
+
+    const userId = req.user.userId;
+    const balance = await getOrCreateBalance(userId);
     const quests = await Quest.find({ enabled: true }).sort({ sortOrder: 1 });
-    const userQuests = await UserQuest.find({ userId: req.user.userId });
+    const userQuests = await UserQuest.find({ userId });
     const progressMap = {};
     userQuests.forEach((uq) => {
-      progressMap[uq.questId.toString()] = {
-        completed: uq.completed,
-        completedAt: uq.completedAt,
-        progress: uq.progress,
-      };
+      progressMap[uq.questId.toString()] = uq;
     });
 
-    const result = quests.map((q) => ({
-      ...q.toObject(),
-      userProgress: progressMap[q._id.toString()] || { completed: false, progress: 0 },
-    }));
+    const result = await Promise.all(
+      quests.map(async (q) => {
+        const userQuest = progressMap[q._id.toString()] || null;
+        const runtime = await evaluateQuestProgress(q, userId, balance, userQuest);
+
+        return {
+          ...q.toObject(),
+          userProgress: {
+            completed: runtime.completed,
+            completionCount: runtime.completionCount,
+            completionLimit: runtime.completionLimit,
+            completedAt: userQuest?.completedAt || null,
+            lastCompletedAt: userQuest?.lastCompletedAt || userQuest?.completedAt || null,
+            progress: runtime.progress,
+            current: runtime.current,
+            target: runtime.target,
+            remaining: runtime.remaining,
+            claimable: runtime.claimable,
+            cooldownActive: runtime.cooldownActive,
+            nextEligibleAt: runtime.nextEligibleAt,
+            blockedReason: runtime.blockedReason,
+            status: runtime.status,
+          },
+        };
+      })
+    );
 
     res.json(result);
   } catch (err) {
@@ -666,53 +1898,108 @@ exports.getQuests = async (req, res) => {
 // POST /api/loyalty/quests/:id/complete — Complete a quest
 exports.completeQuest = async (req, res) => {
   try {
+    const userId = req.user.userId;
     const quest = await Quest.findById(req.params.id);
     if (!quest || !quest.enabled) {
       return res.status(404).json({ message: "Quest not found" });
     }
 
-    // Check if already completed
+    if (quest.featureFlag === false) {
+      return res.status(400).json({ message: "Quest is coming soon" });
+    }
+
     let userQuest = await UserQuest.findOne({
-      userId: req.user.userId,
+      userId,
       questId: quest._id,
     });
+    const bal = await getOrCreateBalance(userId);
+    const runtime = await evaluateQuestProgress(quest, userId, bal, userQuest);
 
-    if (userQuest && userQuest.completed) {
+    if (runtime.completed) {
       return res.status(400).json({ message: "Quest already completed" });
     }
 
-    // Create or update user quest
+    if (runtime.cooldownActive) {
+      return res.status(429).json({
+        message: "Quest cooldown active",
+        nextEligibleAt: runtime.nextEligibleAt,
+        retryAfterSeconds: Math.ceil((new Date(runtime.nextEligibleAt).getTime() - Date.now()) / 1000),
+      });
+    }
+
+    if (runtime.blockedReason) {
+      return res.status(403).json({ message: runtime.blockedReason });
+    }
+
+    if (!runtime.claimable) {
+      return res.status(400).json({
+        message: "Objective requirements not met yet",
+        progress: runtime.progress,
+        current: runtime.current,
+        target: runtime.target,
+      });
+    }
+
+    const nextCompletionCount = runtime.completionCount + 1;
+    let earnedResult;
+
+    if (quest.type === "signup_welcome") {
+      const signupGrant = await grantSignupBonus(userId);
+      earnedResult = signupGrant.result;
+    } else {
+      const pointValueEur = toNumber(await getConfig("point_value_eur", 0.01), 0.01);
+      earnedResult = await addPoints(
+        userId,
+        quest.rewardPoints,
+        "earn",
+        "quest",
+        `Quest completed: ${quest.title}`,
+        { questId: quest._id, completionCount: nextCompletionCount, questType: quest.type },
+        {
+          idempotencyKey: `quest:${userId}:${quest._id}:${nextCompletionCount}`,
+          economyCostEstimate: toNumber(quest.rewardPoints, 0) * pointValueEur,
+        }
+      );
+    }
+
+    const now = new Date();
+    const completionLimit = runtime.completionLimit;
     if (!userQuest) {
       userQuest = await UserQuest.create({
-        userId: req.user.userId,
+        userId,
         questId: quest._id,
-        completed: true,
-        completedAt: new Date(),
+        completed: nextCompletionCount >= completionLimit,
+        completedAt: now,
+        completionCount: nextCompletionCount,
+        lastCompletedAt: now,
         progress: 100,
       });
     } else {
-      userQuest.completed = true;
-      userQuest.completedAt = new Date();
+      userQuest.completionCount = nextCompletionCount;
+      userQuest.completed = nextCompletionCount >= completionLimit;
+      userQuest.completedAt = now;
+      userQuest.lastCompletedAt = now;
       userQuest.progress = 100;
       await userQuest.save();
     }
 
-    // Award points
-    const result = await addPoints(
-      req.user.userId,
-      quest.rewardPoints,
-      "earn",
-      "quest",
-      `Quest completed: ${quest.title}`,
-      { questId: quest._id }
-    );
+    earnedResult.balance.engagementScore =
+      (earnedResult.balance.engagementScore || 0) +
+      Math.min(12, Math.max(3, Math.floor(toNumber(earnedResult.transaction.amount, 0) / 20)));
+    await updateTierFromSignals(earnedResult.balance);
+    await earnedResult.balance.save();
 
     res.json({
-      message: `Quest completed! +${result.transaction.amount} points`,
-      earned: result.transaction.amount,
-      newBalance: result.balance.points,
+      message: `Quest completed! +${earnedResult.transaction.amount} points`,
+      earned: earnedResult.transaction.amount,
+      newBalance: earnedResult.balance.points,
+      completionCount: nextCompletionCount,
+      completionLimit,
     });
   } catch (err) {
+    if (err.status) {
+      return res.status(err.status).json({ message: err.message, ...(err.meta || {}) });
+    }
     res.status(500).json({ message: "Error completing quest", error: err.message });
   }
 };
@@ -724,10 +2011,9 @@ exports.completeQuest = async (req, res) => {
 // GET /api/loyalty/packs — List available packs
 exports.getPacks = async (req, res) => {
   try {
-    await ensureAdvancedLoyaltyDefaults();
-
     const bal = await getOrCreateBalance(req.user.userId);
     ensurePackProgress(bal);
+    ensurePackCooldowns(bal);
 
     let packs = await Pack.find({ enabled: true, packClass: { $in: ["silver", "gold", "platinum"] } })
       .select("-drops.weight")
@@ -754,140 +2040,271 @@ exports.getPacks = async (req, res) => {
 
 // POST /api/loyalty/packs/:id/open — Open a pack (secure server-side RNG)
 exports.openPack = async (req, res) => {
+  const session = await Pack.startSession();
   try {
-    await ensureAdvancedLoyaltyDefaults();
+    const userId = req.user.userId;
+    let payload = null;
 
-    const pack = await Pack.findById(req.params.id);
-    if (!pack || !pack.enabled) {
-      return res.status(404).json({ message: "Pack not found or disabled" });
-    }
+    await session.withTransaction(async () => {
+      const pack = await Pack.findById(req.params.id).session(session);
+      if (!pack || !pack.enabled) {
+        throw new Error("Pack not found or disabled");
+      }
 
-    const bal = await getOrCreateBalance(req.user.userId);
-    const packClass = normalizePackClass(pack);
-    const progress = ensurePackProgress(bal)[packClass];
-    const membershipLuck = await getPackLuckMultiplier(bal.tier);
+      const bal = await getOrCreateBalance(userId, session);
+      const packClass = normalizePackClass(pack);
+      const progress = ensurePackProgress(bal)[packClass];
+      const cooldowns = ensurePackCooldowns(bal);
+      const membershipLuck = await getPackLuckMultiplier(bal.tier);
 
-    // Check tier
-    if (!tierAllows(bal.tier, pack.tierRequired)) {
-      return res.status(403).json({ message: `Requires ${pack.tierRequired} tier` });
-    }
+      if (!tierAllows(bal.tier, pack.tierRequired)) {
+        throw new Error(`Requires ${pack.tierRequired} tier`);
+      }
 
-    // Check points
-    if (bal.points < pack.pointsCost) {
-      return res.status(400).json({ message: "Not enough points", required: pack.pointsCost, current: bal.points });
-    }
+      if (bal.points < pack.pointsCost) {
+        throw new Error("Not enough points");
+      }
 
-    // Deduct points for opening
-    await addPoints(req.user.userId, -pack.pointsCost, "spend", "pack_open", `Opened pack: ${pack.name}`, { packId: pack._id });
+      const cooldownUntil = cooldowns[packClass] ? new Date(cooldowns[packClass]) : null;
+      if (cooldownUntil && cooldownUntil > new Date()) {
+        throw new Error(`Cooldown active: ${Math.ceil((cooldownUntil.getTime() - Date.now()) / 1000)} seconds remaining`);
+      }
 
-    const pityTriggeredLegendary = !!pack.pityLegendaryThreshold && progress.withoutLegendary + 1 >= pack.pityLegendaryThreshold;
-    const pityTriggeredEpic = !pityTriggeredLegendary && !!pack.pityEpicThreshold && progress.withoutEpic + 1 >= pack.pityEpicThreshold;
+      const globalDailyCap = Math.max(1, toNumber(await getConfig("daily_pack_open_cap", 15), 15));
+      const globalMonthlyCap = Math.max(1, toNumber(await getConfig("monthly_pack_open_cap", 250), 250));
+      const dailyCap = Math.min(globalDailyCap, Math.max(1, toNumber(pack.dailyOpenLimit, globalDailyCap)));
+      const monthlyCap = Math.min(globalMonthlyCap, Math.max(1, toNumber(pack.monthlyOpenLimit, globalMonthlyCap)));
 
-    let minimumRarity = pack.guaranteedRarity || "common";
-    if (pityTriggeredLegendary) {
-      minimumRarity = "legendary";
-    } else if (pityTriggeredEpic) {
-      minimumRarity = getStrongerRarity(minimumRarity, "epic");
-    }
+      const [opensToday, opensThisMonth] = await Promise.all([
+        PackOpening.countDocuments({ userId, createdAt: { $gte: startOfUtcDay() } }).session(session),
+        PackOpening.countDocuments({ userId, createdAt: { $gte: startOfUtcMonth() } }).session(session),
+      ]);
 
-    const eligibleDrops = pack.drops.filter((drop) => rarityAtLeast(drop.rarity, minimumRarity));
-    const dropsPool = eligibleDrops.length > 0 ? eligibleDrops : pack.drops;
-    const selectedDrop = chooseWeightedDrop(
-      dropsPool,
-      membershipLuck * (pack.bonusMultiplier || 1)
-    );
+      if (opensToday >= dailyCap) {
+        await createAbuseFlag(userId, "pack_open_spam", "medium", "Daily pack open cap exceeded", {
+          opensToday,
+          dailyCap,
+          packId: pack._id,
+        });
+        throw new Error("Daily pack opening limit reached");
+      }
 
-    // Process the drop reward
-    let resultValue = null;
-    let description = "";
+      if (opensThisMonth >= monthlyCap) {
+        throw new Error("Monthly pack opening limit reached");
+      }
 
-    switch (selectedDrop.type) {
-      case "points": {
-        const earned = selectedDrop.pointsAmount || 50;
-        await addPoints(req.user.userId, earned, "earn", "pack_open", `Pack drop: ${earned} points`, { packId: pack._id });
+      const pointValueEur = toNumber(await getConfig("point_value_eur", 0.01), 0.01);
+      const maxLiabilityRatio = toNumber(await getConfig("max_pack_liability_ratio", 2.25), 2.25);
+      const expectedLiabilityEuro = await estimatePackExpectedLiabilityEuro(pack);
+      const burnValueEuro = pack.pointsCost * pointValueEur;
+      if (expectedLiabilityEuro > burnValueEuro * maxLiabilityRatio) {
+        throw new Error("Pack temporarily disabled by economy guardrails");
+      }
+
+      const openNonce = crypto.randomBytes(10).toString("hex");
+      await addPoints(
+        userId,
+        -pack.pointsCost,
+        "spend",
+        "pack_open",
+        `Opened pack: ${pack.name}`,
+        { packId: pack._id, openNonce },
+        {
+          idempotencyKey: `pack-open:${userId}:${pack._id}:${openNonce}`,
+          session,
+          bypassInflationControls: true,
+        }
+      );
+
+      const pityTriggeredLegendary =
+        !!pack.pityLegendaryThreshold && progress.withoutLegendary + 1 >= pack.pityLegendaryThreshold;
+      const pityTriggeredEpic =
+        !pityTriggeredLegendary &&
+        !!pack.pityEpicThreshold &&
+        progress.withoutEpic + 1 >= pack.pityEpicThreshold;
+
+      let minimumRarity = pack.guaranteedRarity || "common";
+      if (pityTriggeredLegendary) {
+        minimumRarity = "legendary";
+      } else if (pityTriggeredEpic) {
+        minimumRarity = getStrongerRarity(minimumRarity, "epic");
+      }
+
+      const eligibleDrops = (pack.drops || []).filter((drop) => rarityAtLeast(drop.rarity, minimumRarity));
+      const dropsPool = eligibleDrops.length > 0 ? eligibleDrops : pack.drops;
+      const secureRoll = buildSecureRoll(`${userId}:${pack._id}:${openNonce}`);
+      const selectedDrop = chooseWeightedDrop(
+        dropsPool,
+        membershipLuck * (pack.bonusMultiplier || 1),
+        secureRoll.roll
+      );
+
+      let resultValue = null;
+      let description = "";
+
+      if (selectedDrop.type === "points") {
+        const earned = Math.max(0, toNumber(selectedDrop.pointsAmount, 50));
+        await addPoints(
+          userId,
+          earned,
+          "earn",
+          "pack_open",
+          `Pack drop: ${earned} points`,
+          { packId: pack._id, openNonce },
+          {
+            idempotencyKey: `pack-drop:${userId}:${pack._id}:${openNonce}`,
+            session,
+            economyCostEstimate: earned * pointValueEur,
+          }
+        );
         resultValue = earned;
         description = `${earned} bonus points`;
-        break;
-      }
-      case "coupon": {
+      } else if (selectedDrop.type === "coupon" || selectedDrop.type === "gift_card") {
         const code = generateCouponCode();
+        const couponExpiresDays = Math.max(
+          1,
+          toNumber(await getConfig("coupon_default_expiry_days", 14), 14)
+        );
+        const minCartValue = Math.max(
+          0,
+          toNumber(await getConfig("coupon_default_min_cart_value", 25), 25)
+        );
+
+        const createdCoupons = await Coupon.create(
+          [
+            {
+              code,
+              userId,
+              source: "pack",
+              discountPercent: toNumber(selectedDrop.discountPercent, 0),
+              discountAmount: toNumber(selectedDrop.discountAmount, 0),
+              minimumCartValue: minCartValue,
+              expiresAt: addDays(new Date(), couponExpiresDays),
+              metadata: {
+                rarity: selectedDrop.rarity,
+                packId: pack._id,
+                openNonce,
+                oneCouponPerOrder: true,
+              },
+            },
+          ],
+          { session }
+        );
+
+        const coupon = createdCoupons[0];
         resultValue = {
           code,
-          discountPercent: selectedDrop.discountPercent,
-          discountAmount: selectedDrop.discountAmount,
+          discountPercent: coupon.discountPercent,
+          discountAmount: coupon.discountAmount,
+          expiresAt: coupon.expiresAt,
+          minimumCartValue: coupon.minimumCartValue,
         };
-        description = selectedDrop.label || "Discount coupon";
-        break;
-      }
-      case "gift_card": {
-        const code = generateCouponCode();
-        resultValue = {
-          code,
-          amount: selectedDrop.discountAmount,
-        };
-        description = selectedDrop.label || `€${selectedDrop.discountAmount} gift card`;
-        break;
-      }
-      case "product": {
+
+        description =
+          selectedDrop.type === "coupon"
+            ? selectedDrop.label || "Discount coupon"
+            : selectedDrop.label || `€${selectedDrop.discountAmount} gift card`;
+      } else if (selectedDrop.type === "product") {
         resultValue = { productId: selectedDrop.productId };
         description = selectedDrop.label || "Free product";
-        break;
-      }
-      default: {
+      } else {
         resultValue = null;
         description = "Better luck next time!";
-        break;
       }
-    }
 
-    // Log the opening
-    const opening = await PackOpening.create({
-      userId: req.user.userId,
-      packId: pack._id,
-      pointsSpent: pack.pointsCost,
-      result: {
-        type: selectedDrop.type,
-        rarity: selectedDrop.rarity,
-        label: selectedDrop.label || description,
-        value: resultValue,
-      },
+      const createdOpenings = await PackOpening.create(
+        [
+          {
+            userId,
+            packId: pack._id,
+            pointsSpent: pack.pointsCost,
+            rngNonce: secureRoll.nonce,
+            rngHash: secureRoll.hash,
+            result: {
+              type: selectedDrop.type,
+              rarity: selectedDrop.rarity,
+              label: selectedDrop.label || description,
+              value: resultValue,
+            },
+          },
+        ],
+        { session }
+      );
+      const opening = createdOpenings[0];
+
+      progress.opens += 1;
+      progress.withoutEpic = rarityAtLeast(selectedDrop.rarity, "epic") ? 0 : progress.withoutEpic + 1;
+      progress.withoutLegendary = selectedDrop.rarity === "legendary" ? 0 : progress.withoutLegendary + 1;
+
+      const baseCooldown = Math.max(
+        0,
+        toNumber(
+          pack.cooldownSeconds,
+          toNumber(await getConfig("pack_open_cooldown_seconds", 120), 120)
+        )
+      );
+      const cooldownReductionPercent = clamp(
+        toNumber(await getPackCooldownReductionPercent(bal.tier), 0),
+        0,
+        90
+      );
+      const effectiveCooldown = Math.max(
+        0,
+        Math.round(baseCooldown * (1 - cooldownReductionPercent / 100))
+      );
+      cooldowns[packClass] = effectiveCooldown > 0 ? new Date(Date.now() + effectiveCooldown * 1000) : null;
+
+      bal.engagementScore = (bal.engagementScore || 0) + 2;
+      await updateTierFromSignals(bal, session);
+      await bal.save({ session });
+
+      payload = {
+        message: "Pack opened!",
+        result: opening.result,
+        newBalance: bal.points,
+        reveal: buildPackReveal(pack, selectedDrop, {
+          pityTriggeredEpic,
+          pityTriggeredLegendary,
+        }),
+        userState: buildPackUserState(pack, bal),
+      };
     });
 
-    // Refresh balance
-    const updatedBal = await getOrCreateBalance(req.user.userId);
-    const updatedProgress = ensurePackProgress(updatedBal)[packClass];
-    updatedProgress.opens += 1;
-    updatedProgress.withoutEpic = rarityAtLeast(selectedDrop.rarity, "epic") ? 0 : updatedProgress.withoutEpic + 1;
-    updatedProgress.withoutLegendary = selectedDrop.rarity === "legendary" ? 0 : updatedProgress.withoutLegendary + 1;
-    await updatedBal.save();
-
-    if (RARITY_ORDER[selectedDrop.rarity] >= RARITY_ORDER.epic) {
+    if (payload && RARITY_ORDER[payload.result.rarity] >= RARITY_ORDER.epic) {
       const { createNotification } = require("./notificationController");
       await createNotification(
         req.user.userId,
         "loyalty_reward",
-        `${selectedDrop.rarity.toUpperCase()} Pack Pull!`,
-        `${selectedDrop.label || description} dropped from ${pack.name}.`,
+        `${payload.result.rarity.toUpperCase()} Pack Pull!`,
+        `${payload.result.label} dropped from your pack opening.`,
         {
-          packId: pack._id,
-          rarity: selectedDrop.rarity,
-          packClass,
+          rarity: payload.result.rarity,
         }
       );
     }
 
-    res.json({
-      message: `Pack opened!`,
-      result: opening.result,
-      newBalance: updatedBal.points,
-      reveal: buildPackReveal(pack, selectedDrop, {
-        pityTriggeredEpic,
-        pityTriggeredLegendary,
-      }),
-      userState: buildPackUserState(pack, updatedBal),
-    });
+    res.json(payload);
   } catch (err) {
+    if (err.message.includes("not found") || err.message.includes("disabled")) {
+      return res.status(404).json({ message: err.message });
+    }
+    if (err.message.includes("Requires")) {
+      return res.status(403).json({ message: err.message });
+    }
+    if (err.message.includes("Cooldown active")) {
+      return res.status(429).json({ message: err.message });
+    }
+    if (
+      err.message.includes("Not enough points") ||
+      err.message.includes("limit") ||
+      err.message.includes("guardrails")
+    ) {
+      return res.status(400).json({ message: err.message });
+    }
+
     res.status(500).json({ message: "Error opening pack", error: err.message });
+  } finally {
+    await session.endSession();
   }
 };
 
@@ -911,8 +2328,6 @@ exports.getPackHistory = async (req, res) => {
 // GET /api/loyalty/membership — Get available tiers + user's current tier
 exports.getMembership = async (req, res) => {
   try {
-    await ensureAdvancedLoyaltyDefaults();
-
     const [tiers, bal] = await Promise.all([
       Membership.find({ enabled: true }),
       getOrCreateBalance(req.user.userId),
@@ -1127,7 +2542,11 @@ exports.adminGrantPoints = async (req, res) => {
       amount > 0 ? "earn" : "spend",
       "admin_grant",
       reason || "Admin adjustment",
-      { adminId: req.user.userId }
+      { adminId: req.user.userId },
+      {
+        bypassInflationControls: true,
+        skipTierMultiplier: true,
+      }
     );
     res.json({ newBalance: result.balance.points, transaction: result.transaction });
   } catch (err) {
@@ -1145,6 +2564,8 @@ exports.adminLoyaltyStats = async (req, res) => {
       totalRedemptions,
       totalPackOpenings,
       topUsers,
+      openAbuseFlags,
+      budgetSnapshot,
     ] = await Promise.all([
       LoyaltyBalance.aggregate([
         { $group: { _id: null, totalPoints: { $sum: "$points" }, totalLifetime: { $sum: "$lifetimePoints" }, count: { $sum: 1 } } },
@@ -1153,6 +2574,8 @@ exports.adminLoyaltyStats = async (req, res) => {
       Redemption.countDocuments(),
       PackOpening.countDocuments(),
       LoyaltyBalance.find().sort({ lifetimePoints: -1 }).limit(5).populate("userId", "username email"),
+      AbuseFlag.countDocuments({ status: { $in: ["open", "investigating"] } }),
+      getBudgetUsageSnapshot(),
     ]);
 
     res.json({
@@ -1162,6 +2585,8 @@ exports.adminLoyaltyStats = async (req, res) => {
       totalTransactions,
       totalRedemptions,
       totalPackOpenings,
+      rewardBudget: budgetSnapshot,
+      openAbuseFlags,
       topUsers: topUsers.map((u) => ({
         username: u.userId?.username,
         email: u.userId?.email,
@@ -1169,6 +2594,65 @@ exports.adminLoyaltyStats = async (req, res) => {
         lifetimePoints: u.lifetimePoints,
         tier: u.tier,
       })),
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ── Admin: Abuse flags list ──
+exports.adminGetAbuseFlags = async (req, res) => {
+  if (!adminCheck(req, res)) return;
+  try {
+    const status = req.query.status;
+    const limit = Math.max(1, Math.min(200, parseInt(req.query.limit, 10) || 50));
+
+    const filter = {};
+    if (status) {
+      filter.status = status;
+    }
+
+    const flags = await AbuseFlag.find(filter)
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .populate("userId", "username email");
+
+    res.json({ flags, count: flags.length });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ── Admin: Pack expected value / ROI preview ──
+exports.adminPreviewPackEconomy = async (req, res) => {
+  if (!adminCheck(req, res)) return;
+  try {
+    const packId = req.params.id || req.body.packId;
+    if (!packId) {
+      return res.status(400).json({ message: "packId is required" });
+    }
+
+    const pack = await Pack.findById(packId);
+    if (!pack) {
+      return res.status(404).json({ message: "Pack not found" });
+    }
+
+    const pointValueEur = toNumber(await getConfig("point_value_eur", 0.01), 0.01);
+    const maxLiabilityRatio = toNumber(await getConfig("max_pack_liability_ratio", 2.25), 2.25);
+    const expectedLiabilityEuro = await estimatePackExpectedLiabilityEuro(pack);
+    const burnedValueEuro = pack.pointsCost * pointValueEur;
+    const evRatio = burnedValueEuro > 0 ? expectedLiabilityEuro / burnedValueEuro : 0;
+
+    res.json({
+      packId: pack._id,
+      packName: pack.name,
+      pointsCost: pack.pointsCost,
+      pointValueEur,
+      expectedLiabilityEuro,
+      burnedValueEuro,
+      evRatio,
+      maxLiabilityRatio,
+      isSafe: evRatio <= maxLiabilityRatio,
     });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -1205,29 +2689,65 @@ exports.seedDefaults = async (req, res) => {
   if (!adminCheck(req, res)) return;
   try {
     await ensureAdvancedLoyaltyDefaults();
-
-    // Default quests
-    const questCount = await Quest.countDocuments();
-    if (questCount === 0) {
-      await Quest.insertMany([
-        { title: "Complete Your Profile", description: "Fill in all profile fields", type: "complete_profile", rewardPoints: 50, icon: "👤", sortOrder: 1 },
-        { title: "Make Your First Purchase", description: "Buy any product from the store", type: "first_purchase", rewardPoints: 100, icon: "🛒", sortOrder: 2 },
-        { title: "7-Day Login Streak", description: "Log in for 7 consecutive days", type: "streak_login", rewardPoints: 200, icon: "🔥", sortOrder: 3, metadata: { requiredDays: 7 } },
-        { title: "Write a Review", description: "Leave a review on any product", type: "write_review", rewardPoints: 75, icon: "⭐", sortOrder: 4 },
-        { title: "Share a Product", description: "Share any product link on social media", type: "share_product", rewardPoints: 50, icon: "📤", sortOrder: 5 },
-        { title: "Follow Us on Twitter", description: "Follow @GamePlug on Twitter", type: "social_follow", rewardPoints: 30, icon: "🐦", sortOrder: 6, metadata: { url: "https://twitter.com/gameplug" } },
-      ]);
-    }
+    await ensureQuestCatalogDefaults();
 
     // Default rewards
     const rewardCount = await Reward.countDocuments();
     if (rewardCount === 0) {
       await Reward.insertMany([
-        { name: "5% Discount Coupon", description: "5% off your next purchase", type: "coupon", pointsCost: 200, discountPercent: 5, image: "🏷️" },
-        { name: "10% Discount Coupon", description: "10% off your next purchase", type: "coupon", pointsCost: 400, discountPercent: 10, image: "🎫" },
-        { name: "€5 Gift Card", description: "€5 credit for the store", type: "gift_card", pointsCost: 500, discountAmount: 5, image: "💳" },
-        { name: "€10 Gift Card", description: "€10 credit for the store", type: "gift_card", pointsCost: 900, discountAmount: 10, image: "💎" },
-        { name: "Mystery Game Key", description: "A random game key from our collection", type: "product", pointsCost: 1500, image: "🎮", stock: 50 },
+        {
+          name: "5% Discount Coupon",
+          description: "5% off your next purchase",
+          type: "coupon",
+          pointsCost: 200,
+          discountPercent: 5,
+          image: "🏷️",
+          couponExpiresDays: 14,
+          minimumCartValue: 20,
+          monthlyRedemptionLimitPerUser: 4,
+        },
+        {
+          name: "10% Discount Coupon",
+          description: "10% off your next purchase",
+          type: "coupon",
+          pointsCost: 400,
+          discountPercent: 10,
+          image: "🎫",
+          couponExpiresDays: 14,
+          minimumCartValue: 35,
+          monthlyRedemptionLimitPerUser: 3,
+        },
+        {
+          name: "€5 Gift Card",
+          description: "€5 credit for the store",
+          type: "gift_card",
+          pointsCost: 500,
+          discountAmount: 5,
+          image: "💳",
+          couponExpiresDays: 30,
+          minimumCartValue: 25,
+          monthlyRedemptionLimitPerUser: 2,
+        },
+        {
+          name: "€10 Gift Card",
+          description: "€10 credit for the store",
+          type: "gift_card",
+          pointsCost: 900,
+          discountAmount: 10,
+          image: "💎",
+          couponExpiresDays: 30,
+          minimumCartValue: 40,
+          monthlyRedemptionLimitPerUser: 1,
+        },
+        {
+          name: "Mystery Game Key",
+          description: "A random game key from our collection",
+          type: "product",
+          pointsCost: 1500,
+          image: "🎮",
+          stock: 50,
+          monthlyRedemptionLimitPerUser: 1,
+        },
       ]);
     }
 

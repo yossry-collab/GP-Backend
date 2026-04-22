@@ -22,6 +22,7 @@ const isFlouciConfigured = () => {
 // Helper: Finalize an order after successful payment
 // ═══════════════════════════════════════════════════════
 const { createNotification } = require("./notificationController");
+const { awardPurchasePointsForOrder } = require("./loyaltyController");
 
 const finalizeOrder = async (order) => {
   // 1. Update order status
@@ -53,6 +54,18 @@ const finalizeOrder = async (order) => {
     { items: [], totalPrice: 0, totalItems: 0 },
     { new: true }
   );
+
+  // 4. Award purchase loyalty points on the backend (idempotent per orderId)
+  try {
+    await awardPurchasePointsForOrder({
+      userId: order.userId,
+      orderId: order._id,
+      amount: order.totalPrice,
+    });
+  } catch (error) {
+    // Never fail payment finalization because loyalty awarding failed.
+    console.error("[Loyalty] Failed to award purchase points:", error.message);
+  }
 
   // Populate for response
   await order.populate("items.productId");

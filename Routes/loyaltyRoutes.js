@@ -3,15 +3,11 @@ const router = express.Router();
 const { verifyToken } = require("../Middleware/authMiddleware");
 const lc = require("../Controller/loyaltyController");
 
-// ═══════════════════════════════════════════════════════
-// ─── USER ENDPOINTS (all require auth) ───────────────
-// ═══════════════════════════════════════════════════════
 
 // Points & Balance
 router.get("/balance", verifyToken, lc.getBalance);
 router.get("/history", verifyToken, lc.getHistory);
 router.post("/daily-login", verifyToken, lc.dailyLogin);
-router.post("/earn-purchase", verifyToken, lc.earnFromPurchase);
 router.post("/signup-bonus", verifyToken, lc.signupBonus);
 
 // Rewards
@@ -38,6 +34,7 @@ router.post("/membership/upgrade", verifyToken, lc.upgradeTier);
 
 // Admin: Overview
 router.get("/admin/stats", verifyToken, lc.adminLoyaltyStats);
+router.get("/admin/abuse-flags", verifyToken, lc.adminGetAbuseFlags);
 router.post("/admin/seed", verifyToken, lc.seedDefaults);
 router.post("/admin/grant-points", verifyToken, lc.adminGrantPoints);
 
@@ -58,6 +55,7 @@ router.put("/admin/quests/:id", verifyToken, lc.adminUpdateQuest);
 
 // Admin: Packs CRUD
 router.get("/admin/packs", verifyToken, lc.adminGetPacks);
+router.get("/admin/packs/:id/preview", verifyToken, lc.adminPreviewPackEconomy);
 router.post("/admin/packs", verifyToken, lc.adminCreatePack);
 router.put("/admin/packs/:id", verifyToken, lc.adminUpdatePack);
 

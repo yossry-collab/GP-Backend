@@ -2,8 +2,9 @@ const User = require("../Models/userModel");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
-const axios = require("axios");
 const nodemailer = require("nodemailer");
+const mongoose = require("mongoose");
+const { awardReferralInviteBonus } = require("./loyaltyController");
 const {
   normalizeEmail,
   validateTrustedEmail,
@@ -144,59 +145,6 @@ const buildPasswordResetEmail = (code) => ({
     `,
 });
 
-const sendWithBrevo = async (email, code) => {
-  const brevoApiKey = process.env.BREVO_API_KEY;
-  const brevoFromEmail = process.env.BREVO_FROM_EMAIL;
-  const brevoFromName = process.env.BREVO_FROM_NAME || "GamePlug Security";
-
-  if (!brevoApiKey || !brevoFromEmail) {
-    return { ok: false, skipped: true, reason: "BREVO_API_KEY/BREVO_FROM_EMAIL not set" };
-  }
-
-  try {
-    const emailContent = buildPasswordResetEmail(code);
-
-    await axios.post(
-      "https://api.brevo.com/v3/smtp/email",
-      {
-        sender: {
-          name: brevoFromName,
-          email: brevoFromEmail,
-        },
-        to: [{ email }],
-        subject: emailContent.subject,
-        textContent: emailContent.text,
-        htmlContent: emailContent.html,
-      },
-      {
-        headers: {
-          "api-key": brevoApiKey,
-          "Content-Type": "application/json",
-        },
-        timeout: SMTP_TIMEOUT_MS,
-      },
-    );
-
-    return { ok: true };
-  } catch (error) {
-    const brevoStatus = error.response?.status;
-    const brevoPayload = error.response?.data;
-    const brevoReason =
-      brevoPayload?.message ||
-      brevoPayload?.code ||
-      error.message;
-    console.warn("Brevo API unavailable, falling back to other mail providers:", {
-      message: error.message,
-      status: brevoStatus,
-      response: brevoPayload,
-    });
-    return {
-      ok: false,
-      reason: `Brevo${brevoStatus ? ` ${brevoStatus}` : ""}${brevoReason ? `: ${brevoReason}` : ""}`,
-    };
-  }
-};
-
 const sendWithSmtp = async (email, code) => {
   const emailContent = buildPasswordResetEmail(code);
   const fromEmail = process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER;
@@ -241,66 +189,12 @@ const sendWithSmtp = async (email, code) => {
 };
 
 const sendPasswordResetEmail = async (email, code) => {
-  const providerErrors = [];
-
   const smtpResult = await sendWithSmtp(email, code);
   if (smtpResult.ok === true) {
     return;
   }
-  if (!smtpResult.skipped && smtpResult.reason) {
-    providerErrors.push(smtpResult.reason);
-  }
-
-  const emailContent = buildPasswordResetEmail(code);
-  const resendApiKey = process.env.RESEND_API_KEY;
-  const resendFromEmail =
-    process.env.RESEND_FROM_EMAIL ||
-    process.env.SMTP_FROM_EMAIL ||
-    process.env.SMTP_USER;
-
-  if (resendApiKey && resendFromEmail) {
-    try {
-      await axios.post(
-        "https://api.resend.com/emails",
-        {
-          from: `GamePlug Security <${resendFromEmail}>`,
-          to: [email],
-          subject: emailContent.subject,
-          text: emailContent.text,
-          html: emailContent.html,
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${resendApiKey}`,
-            "Content-Type": "application/json",
-          },
-          timeout: SMTP_TIMEOUT_MS,
-        },
-      );
-
-      return;
-    } catch (error) {
-      const status = error.response?.status;
-      const reason = error.response?.data?.message || error.message;
-      providerErrors.push(`Resend${status ? ` ${status}` : ""}${reason ? `: ${reason}` : ""}`);
-      console.warn("Resend API unavailable, falling back to other mail providers:", {
-        message: error.message,
-        status,
-        response: error.response?.data,
-      });
-    }
-  }
-
-  const brevoResult = await sendWithBrevo(email, code);
-  if (brevoResult.ok === true) {
-    return;
-  }
-  if (!brevoResult.skipped && brevoResult.reason) {
-    providerErrors.push(brevoResult.reason);
-  }
-
   throw new Error(
-    `Failed to send reset code using SMTP, Resend, or Brevo. ${providerErrors.length ? `Details: ${providerErrors.join(" | ")}` : "No provider was configured."}`,
+    `Failed to send reset code using SMTP. ${smtpResult.reason ? `Details: ${smtpResult.reason}` : "SMTP transport not configured."}`,
   );
 };
 
@@ -310,6 +204,9 @@ exports.register = async (req, res) => {
     const username = String(req.body?.username || "").trim();
     const password = String(req.body?.password || "");
     const phonenumber = String(req.body?.phonenumber || "").trim();
+    const referralCode = String(
+      req.body?.referralCode || req.body?.ref || ""
+    ).trim();
     const emailCheck = validateTrustedEmail(req.body?.email);
     const normalizedEmail = emailCheck.normalizedEmail;
 
@@ -351,6 +248,24 @@ exports.register = async (req, res) => {
       phonenumber: phonenumber || undefined,
     });
     await user.save();
+
+    if (
+      referralCode &&
+      mongoose.Types.ObjectId.isValid(referralCode) &&
+      referralCode !== String(user._id)
+    ) {
+      try {
+        await awardReferralInviteBonus(referralCode, user, {
+          idempotencyKey: `referral:${referralCode}:${String(user._id)}`,
+        });
+      } catch (referralError) {
+        console.warn("Referral bonus could not be applied:", {
+          referralCode,
+          userId: String(user._id),
+          error: referralError?.message,
+        });
+      }
+    }
 
     const token = issueTokenForUser(user);
 

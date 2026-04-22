@@ -1,13 +1,3 @@
-/**
- * Seed Script - Import products from CSV into MongoDB
- * 
- * Usage:
- *   1. Make sure your backend .env has MONGO_URI set
- *   2. Run: node data/seed.js
- * 
- * This will read ecommerce_products_fixed.csv and insert all products into your database.
- */
-
 const mongoose = require('mongoose');
 const fs = require('fs');
 const path = require('path');
@@ -107,15 +97,15 @@ const imageFallbacks = {
 
 async function seed() {
     try {
-        console.log('🔌 Connecting to MongoDB...');
+        console.log('Connecting to MongoDB...');
         await mongoose.connect(MONGODB_URI);
-        console.log('✅ Connected to MongoDB');
+        console.log('Connected to MongoDB');
 
         const products = [];
         const csvPath = path.join(__dirname, 'ecommerce_products.csv');
 
         if (!fs.existsSync(csvPath)) {
-            console.error('❌ CSV file not found:', csvPath);
+            console.error(' CSV file not found:', csvPath);
             return;
         }
 
@@ -164,19 +154,19 @@ async function seed() {
                 .on('error', reject);
         });
 
-        console.log(`📦 Parsed ${products.length} products from CSV`);
+        console.log(` Parsed ${products.length} products from CSV`);
 
         // Clear existing products
         const existingCount = await Product.countDocuments();
         if (existingCount > 0) {
-            console.log(`⚠️  Found ${existingCount} existing products. Clearing...`);
+            console.log(`Found ${existingCount} existing products. Clearing...`);
             await Product.deleteMany({});
-            console.log('🗑️  Cleared existing products');
+            console.log('Cleared existing products');
         }
 
         // Insert all products
         const result = await Product.insertMany(products);
-        console.log(`✅ Successfully inserted ${result.length} products!`);
+        console.log(`Successfully inserted ${result.length} products!`);
 
         // Summary
         const games = products.filter(p => p.category === 'game').length;
@@ -192,23 +182,15 @@ async function seed() {
             subcategories[key] = (subcategories[key] || 0) + 1;
         });
 
-        console.log('\n📊 Summary:');
-        console.log(`   🎮 Games:        ${games}`);
-        console.log(`   💻 Software:     ${software}`);
-        console.log(`   🎁 Gift Cards:   ${giftCards}`);
-        console.log(`   ⭐ Featured:     ${featuredCount}`);
-        console.log(`   🏷️  With Discount: ${withDiscount}`);
-        console.log(`   📦 Total:        ${products.length}`);
-        console.log('\n📂 Subcategories:');
         Object.entries(subcategories).sort().forEach(([key, count]) => {
-            console.log(`   ${key}: ${count}`);
+            console.log(`${key}: ${count}`);
         });
 
     } catch (error) {
-        console.error('❌ Seed error:', error.message);
+        console.error('Seed error:', error.message);
     } finally {
         await mongoose.disconnect();
-        console.log('\n🔌 Disconnected from MongoDB');
+        console.log('Disconnected from MongoDB');
     }
 }
 

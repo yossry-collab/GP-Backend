@@ -3,6 +3,7 @@ const Cart = require("../Models/cartModel");
 const Product = require("../Models/productModel");
 const User = require("../Models/userModel");
 const { createNotification } = require("./notificationController");
+const { revokePurchasePointsForOrder } = require("./loyaltyController");
 
 // Helper function to validate stock availability
 const validateStockAvailability = async (items) => {
@@ -48,6 +49,9 @@ exports.checkoutOrder = async (req, res) => {
         productId: item.productId,
         quantity: item.quantity,
         price: item.price,
+        listPrice: item.listPrice ?? item.price,
+        discountPercentage: item.discountPercentage || 0,
+        marginClass: item.marginClass,
         name: item.name,
         category: item.category || '',
       }));
@@ -288,6 +292,9 @@ exports.updateOrderStatus = async (req, res) => {
       return res.status(404).json({ message: "Order not found" });
     }
 
+    const previousStatus = order.status;
+    const previousPaymentStatus = order.paymentStatus;
+
     if (status) {
       if (!["pending", "completed", "failed"].includes(status)) {
         return res.status(400).json({ message: "Invalid status value" });
@@ -303,6 +310,22 @@ exports.updateOrderStatus = async (req, res) => {
     }
 
     await order.save();
+
+    const shouldReversePoints =
+      (previousPaymentStatus === "paid" || previousStatus === "completed") &&
+      (order.paymentStatus === "failed" || order.status === "failed");
+
+    if (shouldReversePoints) {
+      try {
+        await revokePurchasePointsForOrder({
+          userId: order.userId,
+          orderId: order._id,
+          reason: "Order marked failed/refunded by admin",
+        });
+      } catch (loyaltyErr) {
+        console.error("[Loyalty] Failed to reverse purchase points:", loyaltyErr.message);
+      }
+    }
 
     // Send notification to the user about status change
     const statusLabels = { pending: "Pending", completed: "Approved", failed: "Rejected" };
@@ -360,12 +383,18 @@ exports.overrideOrder = async (req, res) => {
       return res.status(404).json({ message: "Order not found" });
     }
 
+    const previousStatus = order.status;
+    const previousPaymentStatus = order.paymentStatus;
+
     // Update items if provided
     if (items && Array.isArray(items) && items.length > 0) {
       order.items = items.map(item => ({
         productId: item.productId,
         quantity: item.quantity,
         price: item.price,
+        listPrice: item.listPrice ?? item.price,
+        discountPercentage: item.discountPercentage || 0,
+        marginClass: item.marginClass,
         name: item.name,
         category: item.category || "",
       }));
@@ -394,6 +423,22 @@ exports.overrideOrder = async (req, res) => {
     }
 
     await order.save();
+
+    const shouldReversePoints =
+      (previousPaymentStatus === "paid" || previousStatus === "completed") &&
+      (order.paymentStatus === "failed" || order.status === "failed");
+
+    if (shouldReversePoints) {
+      try {
+        await revokePurchasePointsForOrder({
+          userId: order.userId,
+          orderId: order._id,
+          reason: "Order overridden to failed/refunded",
+        });
+      } catch (loyaltyErr) {
+        console.error("[Loyalty] Failed to reverse purchase points:", loyaltyErr.message);
+      }
+    }
 
     await order.populate([
       { path: "userId", select: "username email phonenumber" },
