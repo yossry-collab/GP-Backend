@@ -1,7 +1,7 @@
 const Order = require("../Models/orderModel");
-const Cart = require("../Models/cartModel");
 const Product = require("../Models/productModel");
 const User = require("../Models/userModel");
+const { Coupon } = require("../Models/loyaltyModel");
 const { createNotification } = require("./notificationController");
 const { revokePurchasePointsForOrder } = require("./loyaltyController");
 
@@ -40,35 +40,34 @@ const validatePrices = async (items) => {
 // 1. Checkout Order - Main checkout function
 exports.checkoutOrder = async (req, res) => {
   try {
-    const userId = req.user.userId || req.user._id;
-    let cartItems, cartTotalPrice, cartTotalItems;
-
-    // Accept items from request body (frontend localStorage cart)
-    if (req.body.items && req.body.items.length > 0) {
-      cartItems = req.body.items.map(item => ({
-        productId: item.productId,
-        quantity: item.quantity,
-        price: item.price,
-        listPrice: item.listPrice ?? item.price,
-        discountPercentage: item.discountPercentage || 0,
-        marginClass: item.marginClass,
-        name: item.name,
-        category: item.category || '',
-      }));
-      cartTotalItems = cartItems.reduce((sum, i) => sum + i.quantity, 0);
-      cartTotalPrice = cartItems.reduce((sum, i) => sum + i.price * i.quantity, 0);
-    } else {
-      // Fallback: check MongoDB cart
-      const cart = await Cart.findOne({ userId });
-      if (!cart || cart.items.length === 0) {
-        return res.status(400).json({
-          message: "Cart is empty. Cannot proceed with checkout.",
-        });
-      }
-      cartItems = cart.items;
-      cartTotalPrice = cart.totalPrice;
-      cartTotalItems = cart.totalItems;
+    if (req.user && req.user.role === "admin") {
+      return res.status(403).json({
+        message: "Admins are not allowed to place orders or make purchases.",
+      });
     }
+
+    const userId = req.user.userId || req.user._id;
+    const items = req.body.items;
+
+    if (!items || items.length === 0) {
+      return res.status(400).json({
+        message: "Cart is empty. Cannot proceed with checkout.",
+      });
+    }
+
+    const cartItems = items.map((item) => ({
+      productId: item.productId,
+      quantity: item.quantity,
+      price: item.price,
+      listPrice: item.listPrice ?? item.price,
+      discountPercentage: item.discountPercentage || 0,
+      marginClass: item.marginClass,
+      name: item.name,
+      category: item.category || '',
+    }));
+
+    const cartTotalItems = cartItems.reduce((sum, item) => sum + item.quantity, 0);
+    let cartTotalPrice = cartItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
 
     // Validate all products still exist
     for (const item of cartItems) {
@@ -86,6 +85,33 @@ exports.checkoutOrder = async (req, res) => {
     // Validate prices (warn if prices changed but still proceed)
     await validatePrices(cartItems);
 
+    // Handle discount code
+    let appliedCouponDoc = null;
+    if (req.body.discountCode) {
+      const coupon = await Coupon.findOne({
+        code: req.body.discountCode.toUpperCase(),
+        status: "unused"
+      });
+
+      if (coupon) {
+        // Double check expiration & ownership
+        if (new Date() <= new Date(coupon.expiresAt)) {
+          if (!coupon.userId || coupon.userId.toString() === userId.toString()) {
+            if (cartTotalPrice >= (coupon.minimumCartValue || 0)) {
+              let discountAmount = 0;
+              if (coupon.discountPercent > 0) {
+                discountAmount = cartTotalPrice * (coupon.discountPercent / 100);
+              } else {
+                discountAmount = coupon.discountAmount;
+              }
+              cartTotalPrice = Math.max(0, cartTotalPrice - discountAmount);
+              appliedCouponDoc = coupon;
+            }
+          }
+        }
+      }
+    }
+
     // Create new Order with cart items
     const order = new Order({
       userId,
@@ -99,11 +125,19 @@ exports.checkoutOrder = async (req, res) => {
     // Save order to database
     await order.save();
 
+    // Mark coupon as used
+    if (appliedCouponDoc) {
+      appliedCouponDoc.status = "used";
+      appliedCouponDoc.usedAt = new Date();
+      appliedCouponDoc.usedOrderId = order._id;
+      await appliedCouponDoc.save();
+    }
+
     // Populate product details in the saved order
     await order.populate("items.productId");
 
-    // NOTE: Stock deduction and cart clearing are now handled AFTER
-    // payment verification in paymentController.verifyPayment()
+    // NOTE: Stock deduction is handled AFTER payment verification in
+    // paymentController.verifyPayment()
 
     // Return order confirmation
     return res.status(201).json({
@@ -456,3 +490,4 @@ exports.overrideOrder = async (req, res) => {
     });
   }
 };
+

@@ -17,9 +17,7 @@ const Order = require("../Models/orderModel");
 const Product = require("../Models/productModel");
 const User = require("../Models/userModel");
 
-// ═══════════════════════════════════════════════════════
-// ─── HELPERS ─────────────────────────────────────────
-// ═══════════════════════════════════════════════════════
+// HELPERS
 
 // Get or create loyalty balance for a user
 async function getOrCreateBalance(userId, session = null) {
@@ -417,12 +415,14 @@ function buildPackUserState(pack, balance) {
   const packClass = normalizePackClass(pack);
   const progress = ensurePackProgress(balance)[packClass];
   const cooldowns = ensurePackCooldowns(balance);
-  const canOpen = tierAllows(balance.tier, pack.tierRequired) && balance.points >= pack.pointsCost;
+  // Allow opening regardless of tier if they have points
+  const canOpen = balance.points >= pack.pointsCost;
 
   let lockReason = null;
-  if (!tierAllows(balance.tier, pack.tierRequired)) {
+  /* if (!tierAllows(balance.tier, pack.tierRequired)) {
     lockReason = `${pack.tierRequired} tier required`;
-  } else if (balance.points < pack.pointsCost) {
+  } else */
+  if (balance.points < pack.pointsCost) {
     lockReason = `${pack.pointsCost - balance.points} more points needed`;
   }
 
@@ -1097,9 +1097,7 @@ async function estimatePackExpectedLiabilityEuro(pack) {
   return expected;
 }
 
-// ═══════════════════════════════════════════════════════
-// ─── 1. POINTS & BALANCE ────────────────────────────
-// ═══════════════════════════════════════════════════════
+// 1. POINTS & BALANCE
 
 // GET /api/loyalty/balance — Get user's points balance
 exports.getBalance = async (req, res) => {
@@ -1624,9 +1622,7 @@ exports.signupBonus = async (req, res) => {
 
 exports.awardReferralInviteBonus = awardReferralInviteBonus;
 
-// ═══════════════════════════════════════════════════════
-// ─── 2. REWARDS & REDEMPTION ────────────────────────
-// ═══════════════════════════════════════════════════════
+// 2. REWARDS & REDEMPTION
 
 // GET /api/loyalty/rewards — List available rewards
 exports.getRewards = async (req, res) => {
@@ -1844,9 +1840,7 @@ exports.getRedemptions = async (req, res) => {
   }
 };
 
-// ═══════════════════════════════════════════════════════
-// ─── 3. SIDE QUESTS ─────────────────────────────────
-// ═══════════════════════════════════════════════════════
+// 3. SIDE QUESTS
 
 // GET /api/loyalty/quests — Get all quests with user progress
 exports.getQuests = async (req, res) => {
@@ -2004,9 +1998,7 @@ exports.completeQuest = async (req, res) => {
   }
 };
 
-// ═══════════════════════════════════════════════════════
-// ─── 4. PACKS (Loot System) ─────────────────────────
-// ═══════════════════════════════════════════════════════
+// 4. PACKS (Loot System)
 
 // GET /api/loyalty/packs — List available packs
 exports.getPacks = async (req, res) => {
@@ -2057,9 +2049,10 @@ exports.openPack = async (req, res) => {
       const cooldowns = ensurePackCooldowns(bal);
       const membershipLuck = await getPackLuckMultiplier(bal.tier);
 
-      if (!tierAllows(bal.tier, pack.tierRequired)) {
+      // Tier restriction removed based on user request
+      /* if (!tierAllows(bal.tier, pack.tierRequired)) {
         throw new Error(`Requires ${pack.tierRequired} tier`);
-      }
+      } */
 
       if (bal.points < pack.pointsCost) {
         throw new Error("Not enough points");
@@ -2133,11 +2126,22 @@ exports.openPack = async (req, res) => {
       const eligibleDrops = (pack.drops || []).filter((drop) => rarityAtLeast(drop.rarity, minimumRarity));
       const dropsPool = eligibleDrops.length > 0 ? eligibleDrops : pack.drops;
       const secureRoll = buildSecureRoll(`${userId}:${pack._id}:${openNonce}`);
-      const selectedDrop = chooseWeightedDrop(
+      let selectedDrop = chooseWeightedDrop(
         dropsPool,
         membershipLuck * (pack.bonusMultiplier || 1),
         secureRoll.roll
       );
+
+      // --- NEW LOGIC: User requested that every pack ALWAYS gives a redeem code
+      if (selectedDrop.type !== "coupon" && selectedDrop.type !== "gift_card") {
+        selectedDrop = {
+          type: "coupon",
+          rarity: selectedDrop.rarity,
+          discountPercent: pack.pointsCost >= 400 ? 25 : 10,
+          label: `${pack.pointsCost >= 400 ? 25 : 10}% Store Coupon`,
+          revealText: "Guaranteed code drop!"
+        };
+      }
 
       let resultValue = null;
       let description = "";
@@ -2321,9 +2325,7 @@ exports.getPackHistory = async (req, res) => {
   }
 };
 
-// ═══════════════════════════════════════════════════════
-// ─── 5. MEMBERSHIP / TIERS ─────────────────────────
-// ═══════════════════════════════════════════════════════
+// 5. MEMBERSHIP / TIERS
 
 // GET /api/loyalty/membership — Get available tiers + user's current tier
 exports.getMembership = async (req, res) => {
@@ -2384,9 +2386,7 @@ exports.upgradeTier = async (req, res) => {
   }
 };
 
-// ═══════════════════════════════════════════════════════
-// ─── 6. ADMIN ENDPOINTS ─────────────────────────────
-// ═══════════════════════════════════════════════════════
+// 6. ADMIN ENDPOINTS
 
 function adminCheck(req, res) {
   if (req.user.role !== "admin") {
@@ -2396,7 +2396,7 @@ function adminCheck(req, res) {
   return true;
 }
 
-// ── Rewards CRUD ──
+// Rewards CRUD
 exports.adminGetRewards = async (req, res) => {
   if (!adminCheck(req, res)) return;
   try {
@@ -2438,7 +2438,7 @@ exports.adminDeleteReward = async (req, res) => {
   }
 };
 
-// ── Quests CRUD ──
+// Quests CRUD
 exports.adminGetQuests = async (req, res) => {
   if (!adminCheck(req, res)) return;
   try {
@@ -2470,7 +2470,7 @@ exports.adminUpdateQuest = async (req, res) => {
   }
 };
 
-// ── Packs CRUD ──
+// Packs CRUD
 exports.adminGetPacks = async (req, res) => {
   if (!adminCheck(req, res)) return;
   try {
@@ -2502,7 +2502,7 @@ exports.adminUpdatePack = async (req, res) => {
   }
 };
 
-// ── Config CRUD ──
+// Config CRUD
 exports.adminGetConfig = async (req, res) => {
   if (!adminCheck(req, res)) return;
   try {
@@ -2528,7 +2528,7 @@ exports.adminSetConfig = async (req, res) => {
   }
 };
 
-// ── Admin: Grant points to a user ──
+// Admin: Grant points to a user
 exports.adminGrantPoints = async (req, res) => {
   if (!adminCheck(req, res)) return;
   try {
@@ -2554,7 +2554,7 @@ exports.adminGrantPoints = async (req, res) => {
   }
 };
 
-// ── Admin: Loyalty overview stats ──
+// Admin: Loyalty overview stats
 exports.adminLoyaltyStats = async (req, res) => {
   if (!adminCheck(req, res)) return;
   try {
@@ -2600,7 +2600,7 @@ exports.adminLoyaltyStats = async (req, res) => {
   }
 };
 
-// ── Admin: Abuse flags list ──
+// Admin: Abuse flags list
 exports.adminGetAbuseFlags = async (req, res) => {
   if (!adminCheck(req, res)) return;
   try {
@@ -2623,7 +2623,7 @@ exports.adminGetAbuseFlags = async (req, res) => {
   }
 };
 
-// ── Admin: Pack expected value / ROI preview ──
+// Admin: Pack expected value / ROI preview
 exports.adminPreviewPackEconomy = async (req, res) => {
   if (!adminCheck(req, res)) return;
   try {
@@ -2659,7 +2659,7 @@ exports.adminPreviewPackEconomy = async (req, res) => {
   }
 };
 
-// ── Admin: Manage memberships ──
+// Admin: Manage memberships
 exports.adminGetMemberships = async (req, res) => {
   if (!adminCheck(req, res)) return;
   try {
@@ -2684,7 +2684,7 @@ exports.adminUpsertMembership = async (req, res) => {
   }
 };
 
-// ── Seed default config & quests if empty ──
+// Seed default config & quests if empty
 exports.seedDefaults = async (req, res) => {
   if (!adminCheck(req, res)) return;
   try {
@@ -2754,5 +2754,62 @@ exports.seedDefaults = async (req, res) => {
     res.json({ message: "Defaults seeded successfully" });
   } catch (err) {
     res.status(500).json({ message: err.message });
+  }
+};
+
+// 7. COUPONS
+
+// POST /api/loyalty/validate-coupon
+exports.validateCoupon = async (req, res) => {
+  try {
+    const { code } = req.body;
+    if (!code) {
+      return res.status(400).json({ message: "Coupon code is required" });
+    }
+
+    const coupon = await Coupon.findOne({
+      code: code.toUpperCase(),
+      status: "unused"
+    });
+
+    if (!coupon) {
+      return res.status(400).json({ message: "Invalid or already used coupon" });
+    }
+
+    if (new Date() > new Date(coupon.expiresAt)) {
+      return res.status(400).json({ message: "Coupon has expired" });
+    }
+
+    // Check if the user trying to use it is the owner
+    // if the coupon was assigned to a specific user (which it usually is)
+    if (coupon.userId && coupon.userId.toString() !== req.user.userId.toString()) {
+      return res.status(403).json({ message: "This coupon does not belong to you" });
+    }
+
+    const isPercentage = coupon.discountPercent > 0;
+
+    res.json({
+      type: isPercentage ? "percentage" : "fixed",
+      value: isPercentage ? coupon.discountPercent : coupon.discountAmount,
+      minimumCartValue: coupon.minimumCartValue || 0
+    });
+
+  } catch (err) {
+    res.status(500).json({ message: "Error validating coupon", error: err.message });
+  }
+};
+
+// GET /api/loyalty/coupons
+exports.getCoupons = async (req, res) => {
+  try {
+    const coupons = await Coupon.find({
+      userId: req.user.userId,
+      status: "unused",
+      expiresAt: { $gt: new Date() }
+    }).sort({ expiresAt: 1 });
+
+    res.json(coupons);
+  } catch (err) {
+    res.status(500).json({ message: "Error fetching coupons", error: err.message });
   }
 };

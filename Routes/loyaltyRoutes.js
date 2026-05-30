@@ -3,7 +3,6 @@ const router = express.Router();
 const { verifyToken } = require("../Middleware/authMiddleware");
 const lc = require("../Controller/loyaltyController");
 
-
 // Points & Balance
 router.get("/balance", verifyToken, lc.getBalance);
 router.get("/history", verifyToken, lc.getHistory);
@@ -14,6 +13,8 @@ router.post("/signup-bonus", verifyToken, lc.signupBonus);
 router.get("/rewards", verifyToken, lc.getRewards);
 router.post("/rewards/:id/redeem", verifyToken, lc.redeemReward);
 router.get("/redemptions", verifyToken, lc.getRedemptions);
+router.post("/validate-coupon", verifyToken, lc.validateCoupon);
+router.get("/coupons", verifyToken, lc.getCoupons);
 
 // Quests
 router.get("/quests", verifyToken, lc.getQuests);
@@ -28,9 +29,7 @@ router.get("/packs/history", verifyToken, lc.getPackHistory);
 router.get("/membership", verifyToken, lc.getMembership);
 router.post("/membership/upgrade", verifyToken, lc.upgradeTier);
 
-// ═══════════════════════════════════════════════════════
-// ─── ADMIN ENDPOINTS ─────────────────────────────────
-// ═══════════════════════════════════════════════════════
+// ADMIN ENDPOINTS
 
 // Admin: Overview
 router.get("/admin/stats", verifyToken, lc.adminLoyaltyStats);

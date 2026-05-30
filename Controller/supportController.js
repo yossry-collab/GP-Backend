@@ -293,6 +293,39 @@ exports.createSupportTicket = async (req, res) => {
       { ticketId: ticket._id, category: ticket.category, status: ticket.status }
     );
 
+    // Notify all admin users
+    try {
+      const creator = await User.findById(userId).select("username email phonenumber").lean();
+      const creatorName = creator ? creator.username : "A user";
+      const creatorEmail = creator ? creator.email : "No email";
+      const creatorPhone = creator ? creator.phonenumber || "Not provided" : "Not provided";
+      
+      const admins = await User.find({ role: "admin" }).select("_id").lean();
+      if (admins && admins.length > 0) {
+        for (const admin of admins) {
+          await createNotification(
+            admin._id,
+            "system",
+            "Human Support Needed",
+            `${creatorName} (${creatorEmail}) needs human support: "${subject.length > 45 ? subject.slice(0, 45) + "..." : subject}"`,
+            { 
+              ticketId: ticket._id, 
+              category: ticket.category, 
+              status: ticket.status, 
+              creatorId: userId,
+              creatorName,
+              creatorEmail,
+              creatorPhone,
+              subject,
+              message
+            }
+          );
+        }
+      }
+    } catch (adminNotifError) {
+      console.error("Failed to notify admins of support ticket:", adminNotifError.message);
+    }
+
     res.status(201).json({
       message: "Support ticket created successfully",
       ticket,

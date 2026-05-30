@@ -14,6 +14,41 @@ const RESET_CODE_LENGTH = 6;
 const RESET_CODE_TTL_MINUTES = 10;
 const SMTP_TIMEOUT_MS = 15000;
 
+/**
+ * Validate password strength
+ * Requirements: min 8 chars, at least 1 uppercase, 1 lowercase, 1 number
+ */
+function validatePasswordStrength(password) {
+  const minLength = 8;
+  const hasUpperCase = /[A-Z]/.test(password);
+  const hasLowerCase = /[a-z]/.test(password);
+  const hasNumber = /[0-9]/.test(password);
+  const hasSpecialChar = /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(password);
+
+  const errors = [];
+
+  if (password.length < minLength) {
+    errors.push(`Password must be at least ${minLength} characters long`);
+  }
+  if (!hasUpperCase) {
+    errors.push("Password must contain at least one uppercase letter (A-Z)");
+  }
+  if (!hasLowerCase) {
+    errors.push("Password must contain at least one lowercase letter (a-z)");
+  }
+  if (!hasNumber) {
+    errors.push("Password must contain at least one number (0-9)");
+  }
+  if (!hasSpecialChar) {
+    errors.push("Password should contain at least one special character (!@#$%^&*...)");
+  }
+
+  return {
+    isStrong: errors.length <= 1, // allow missing special char (soft requirement)
+    errors,
+  };
+}
+
 const smtpTransporters = new Map();
 
 const getSmtpConfigCandidates = () => {
@@ -214,6 +249,22 @@ exports.register = async (req, res) => {
       return res.status(400).json({ message: "Username, email, and password are required" });
     }
 
+    // Validate password strength
+    const passwordCheck = validatePasswordStrength(password);
+    if (!passwordCheck.isStrong) {
+      // Return errors except the special char one (it's a should, not must)
+      const mandatoryErrors = passwordCheck.errors.filter(
+        (err) => !err.includes("special character")
+      );
+
+      if (mandatoryErrors.length > 0) {
+        return res.status(400).json({
+          message: "Password is too weak",
+          passwordRequirements: mandatoryErrors,
+        });
+      }
+    }
+
     if (!emailCheck.isValid) {
       return res.status(emailCheck.reason === "provider_not_allowed" ? 422 : 400).json({
         message: emailCheck.message,
@@ -324,10 +375,6 @@ exports.login = async (req, res) => {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    // Check if user is banned
-    if (user.isBanned) {
-      return res.status(403).json({ message: "Your account has been banned.", reason: user.banReason || 'No reason provided' });
-    }
 
     // Compare provided password with hashed password in DB
     const isPasswordValid = await bcrypt.compare(password, user.password);
@@ -745,57 +792,6 @@ exports.uploadProfileImage = async (req, res) => {
   }
 };
 
-// BAN - Ban a user by ID
-exports.banUser = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { reason } = req.body;
-
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Admin access required' });
-    }
-
-    const user = await User.findById(id);
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-    if (user.role === 'admin') {
-      return res.status(400).json({ message: 'Cannot ban an admin user' });
-    }
-
-    user.isBanned = true;
-    user.banReason = reason || '';
-    await user.save();
-
-    res.status(200).json({ message: 'User banned successfully', user: { _id: user._id, username: user.username, email: user.email, isBanned: user.isBanned, banReason: user.banReason } });
-  } catch (error) {
-    res.status(500).json({ message: 'Error banning user', error: error.message });
-  }
-};
-
-// UNBAN - Unban a user by ID
-exports.unbanUser = async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Admin access required' });
-    }
-
-    const user = await User.findById(id);
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-
-    user.isBanned = false;
-    user.banReason = '';
-    await user.save();
-
-    res.status(200).json({ message: 'User unbanned successfully', user: { _id: user._id, username: user.username, email: user.email, isBanned: user.isBanned } });
-  } catch (error) {
-    res.status(500).json({ message: 'Error unbanning user', error: error.message });
-  }
-};
 
 // DELETE - Delete user by ID
 exports.deleteUser = async (req, res) => {

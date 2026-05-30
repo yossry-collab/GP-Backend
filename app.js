@@ -8,7 +8,6 @@ const connectDB = require("./src/config/db.js");
 const userRoutes = require("./Routes/userRoutes.js");
 const productRoutes = require("./Routes/productRoutes.js");
 const importRoutes = require("./Routes/importRoutes.js");
-const cartRoutes = require("./Routes/cartRoutes.js");
 const orderRoutes = require("./Routes/orderRoutes.js");
 const cwRoutes = require("./Routes/codesWholesaleRoutes.js");
 const adminRoutes = require("./Routes/adminRoutes.js");
@@ -16,10 +15,22 @@ const loyaltyRoutes = require("./Routes/loyaltyRoutes.js");
 const paymentRoutes = require("./Routes/paymentRoutes.js");
 const notificationRoutes = require("./Routes/notificationRoutes.js");
 const supportRoutes = require("./Routes/supportRoutes.js");
+const chatbotRoutes = require("./Routes/chatbotRoutes.js");
 
 connectDB();
 
 const app = express();
+
+// Simple request logger to aid debugging
+app.use((req, res, next) => {
+  try {
+    console.log(`[REQ] ${req.method} ${req.originalUrl} - IP: ${req.ip}`);
+    if (req.method !== 'GET') {
+      console.log('[REQ BODY]', JSON.stringify(req.body || req._parsedUrl || {}));
+    }
+  } catch (e) {}
+  next();
+});
 
 // CORS Configuration
 const corsOptions = {
@@ -47,9 +58,6 @@ app.use("/api/products", productRoutes);
 // Import Routes
 app.use("/api/import", importRoutes);
 
-// Cart Routes
-app.use("/api/cart", cartRoutes);
-
 // Order Routes
 app.use("/api/orders", orderRoutes);
 
@@ -70,6 +78,9 @@ app.use("/api/notifications", notificationRoutes);
 
 // Support Routes
 app.use("/api/support", supportRoutes);
+
+// Chatbot Routes
+app.use("/api/chatbot", chatbotRoutes);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {

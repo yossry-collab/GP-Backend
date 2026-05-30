@@ -1,6 +1,13 @@
 const express = require("express");
 const router = express.Router();
-const { getStats, getAdvancedStats, getMailingList } = require("../Controller/adminController");
+const {
+  getStats,
+  getAdvancedStats,
+  getMailingList,
+  getAdminTickets,
+  updateAdminTicketStatus,
+  replyToAdminTicket,
+} = require("../Controller/adminController");
 const { verifyToken } = require("../Middleware/authMiddleware");
 
 // GET /api/admin/stats - Dashboard statistics (admin only)
@@ -11,5 +18,10 @@ router.get("/advanced-stats", verifyToken, getAdvancedStats);
 
 // GET /api/admin/mailing-list - Export user emails (admin only)
 router.get("/mailing-list", verifyToken, getMailingList);
+
+// Support ticket routes (admin only)
+router.get("/tickets", verifyToken, getAdminTickets);
+router.put("/tickets/:id/status", verifyToken, updateAdminTicketStatus);
+router.post("/tickets/:id/messages", verifyToken, replyToAdminTicket);
 
 module.exports = router;

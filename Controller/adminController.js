@@ -1,124 +1,9 @@
 const User = require("../Models/userModel");
 const Product = require("../Models/productModel");
 const Order = require("../Models/orderModel");
+const SupportTicket = require("../Models/supportTicketModel");
 
-// ─── Seeded random for consistent virtual data per day ───
-function seededRandom(seed) {
-  let s = seed;
-  return function () {
-    s = (s * 16807 + 0) % 2147483647;
-    return (s - 1) / 2147483646;
-  };
-}
 
-// ─── Generate realistic virtual data blended with real DB data ───
-function generateVirtualData(real) {
-  const now = new Date();
-  const daySeed = now.getFullYear() * 10000 + (now.getMonth() + 1) * 100 + now.getDate();
-  const rand = seededRandom(daySeed);
-
-  // Helper: random int in range (inclusive)
-  const randInt = (min, max) => Math.floor(rand() * (max - min + 1)) + min;
-  // Helper: random float in range
-  const randFloat = (min, max) => +(rand() * (max - min) + min).toFixed(2);
-
-  // ── Boost totals to look realistic ──
-  const totalUsers = real.totalUsers + randInt(230, 380);
-  const totalProducts = real.totalProducts + randInt(45, 85);
-  const vCompletedOrders = randInt(420, 680);
-  const vPendingOrders = randInt(50, 120);
-  const vFailedOrders = randInt(12, 35);
-  const totalOrders = real.totalOrders + vCompletedOrders + vPendingOrders + vFailedOrders;
-  const completedOrders = real.completedOrders + vCompletedOrders;
-  const pendingOrders = real.pendingOrders + vPendingOrders;
-  const failedOrders = real.failedOrders + vFailedOrders;
-  const totalRevenue = real.totalRevenue + randFloat(18000, 42000);
-
-  // ── Monthly orders with a natural growth trend ──
-  // Base curves with seasonal variation
-  const ordersTrend = [28, 35, 42, 55, 48, 62, 70, 58, 75, 82, 90, 95];
-  const usersTrend = [12, 18, 15, 22, 28, 20, 35, 30, 38, 42, 45, 50];
-
-  const monthlyOrders = real.monthlyOrders.map((mo, i) => {
-    const vOrders = ordersTrend[i] + randInt(-8, 12);
-    const vCompleted = Math.floor(vOrders * randFloat(0.55, 0.72));
-    const vPending = Math.floor(vOrders * randFloat(0.15, 0.28));
-    const vFailed = vOrders - vCompleted - vPending;
-    const vRevenue = vOrders * randFloat(25, 65);
-    return {
-      month: mo.month,
-      year: mo.year,
-      orders: mo.orders + vOrders,
-      revenue: Math.round((mo.revenue + vRevenue) * 100) / 100,
-      completed: mo.completed + vCompleted,
-      pending: mo.pending + Math.max(0, vPending),
-      failed: mo.failed + Math.max(0, vFailed),
-    };
-  });
-
-  const monthlyUsers = real.monthlyUsers.map((mu, i) => ({
-    month: mu.month,
-    year: mu.year,
-    users: mu.users + usersTrend[i] + randInt(-4, 8),
-  }));
-
-  // ── Categories with realistic product counts ──
-  const virtualCategories = {
-    game: randInt(30, 55),
-    software: randInt(18, 35),
-    "gift-card": randInt(12, 28),
-  };
-  const categories = {};
-  for (const key of Object.keys(virtualCategories)) {
-    categories[key] = (real.categories[key] || 0) + virtualCategories[key];
-  }
-  // Add any real categories not in virtual
-  for (const key of Object.keys(real.categories)) {
-    if (!categories[key]) categories[key] = real.categories[key];
-  }
-
-  // ── Virtual recent users to fill the table ──
-  const virtualNames = [
-    { username: "leomessi", email: "leo.messi@gmail.com", role: "user" },
-    { username: "vladimir_putin", email: "vladimir.putin@outlook.com", role: "user" },
-    { username: "abu ubaidah", email: "free.palestine@yahoo.com", role: "user" },
-    { username: "alaya brigui", email: "alaya.brigui@gmail.me", role: "admin" },
-    { username: "lamineyamal", email: "lamineyamal@gmail.com", role: "user" },
-    { username: "cr7", email: "cristiano.ronaldi@hotmail.com", role: "user" },
-    { username: "neymarjr", email: "ney.jr@gmail.com", role: "user" },
-    { username: "roberto carlos", email: "carlos.roberto@live.com", role: "user" },
-  ];
-
-  // Mix real recent users with virtual ones (real first, fill up to 8)
-  const recentUsers = [...real.recentUsers];
-  const needed = Math.max(0, 8 - recentUsers.length);
-  for (let i = 0; i < needed && i < virtualNames.length; i++) {
-    const daysAgo = randInt(1, 30);
-    const joinDate = new Date(now);
-    joinDate.setDate(joinDate.getDate() - daysAgo);
-    recentUsers.push({
-      _id: `virtual_${i}_${daySeed}`,
-      username: virtualNames[i].username,
-      email: virtualNames[i].email,
-      role: virtualNames[i].role,
-      createdAt: joinDate.toISOString(),
-    });
-  }
-
-  return {
-    totalUsers,
-    totalProducts,
-    totalOrders,
-    totalRevenue: Math.round(totalRevenue * 100) / 100,
-    completedOrders,
-    pendingOrders,
-    failedOrders,
-    monthlyOrders,
-    monthlyUsers,
-    categories,
-    recentUsers: recentUsers.slice(0, 8),
-  };
-}
 
 // GET /api/admin/stats - Dashboard statistics
 exports.getStats = async (req, res) => {
@@ -136,6 +21,7 @@ exports.getStats = async (req, res) => {
       orders,
       recentUsers,
       productsByCategory,
+      allProducts,
     ] = await Promise.all([
       User.countDocuments(),
       Product.countDocuments(),
@@ -145,6 +31,7 @@ exports.getStats = async (req, res) => {
       Product.aggregate([
         { $group: { _id: "$category", count: { $sum: 1 } } },
       ]),
+      Product.find().select("createdAt"),
     ]);
 
     // Calculate revenue
@@ -192,13 +79,28 @@ exports.getStats = async (req, res) => {
       });
     }
 
+    // Products created by month (last 12 months)
+    const monthlyProducts = [];
+    for (let i = 11; i >= 0; i--) {
+      const start = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const end = new Date(now.getFullYear(), now.getMonth() - i + 1, 0, 23, 59, 59);
+      const count = allProducts.filter(p => {
+        const d = new Date(p.createdAt);
+        return d >= start && d <= end;
+      }).length;
+      monthlyProducts.push({
+        month: start.toLocaleString("default", { month: "short" }),
+        year: start.getFullYear(),
+        products: count,
+      });
+    }
+
     // Category distribution
     const categories = {};
     productsByCategory.forEach(c => {
       categories[c._id] = c.count;
     });
 
-    // ── Blend real data with virtual data for rich charts ──
     const realData = {
       totalUsers,
       totalProducts,
@@ -209,12 +111,12 @@ exports.getStats = async (req, res) => {
       failedOrders,
       monthlyOrders,
       monthlyUsers,
+      monthlyProducts,
       categories,
       recentUsers,
     };
 
-    const enrichedStats = generateVirtualData(realData);
-    res.status(200).json(enrichedStats);
+    res.status(200).json(realData);
   } catch (error) {
     res.status(500).json({
       message: "Error fetching stats",
@@ -262,7 +164,6 @@ exports.getAdvancedStats = async (req, res) => {
 
     // Top 5 products by order frequency
     const productFreq = {};
-    const productRevenue = {};
     orders.forEach(order => {
       (order.items || []).forEach(item => {
         const pid = item.productId?._id?.toString() || item.productId?.toString();
@@ -323,7 +224,7 @@ exports.getMailingList = async (req, res) => {
       return res.status(403).json({ message: "Admin access required" });
     }
 
-    const users = await User.find().select("username email role isBanned createdAt").sort({ createdAt: -1 });
+    const users = await User.find().select("username email role createdAt").sort({ createdAt: -1 });
 
     // Also get unique emails from orders (guests who might not have accounts)
     const orderEmails = await Order.aggregate([
@@ -341,7 +242,7 @@ exports.getMailingList = async (req, res) => {
         username: u.username,
         email: u.email,
         role: u.role,
-        isBanned: u.isBanned || false,
+
         joinedAt: u.createdAt,
       })),
       topBuyers: orderEmails.slice(0, 20),
@@ -350,3 +251,127 @@ exports.getMailingList = async (req, res) => {
     res.status(500).json({ message: "Error fetching mailing list", error: error.message });
   }
 };
+
+// GET /api/admin/tickets - List all tickets for admin
+exports.getAdminTickets = async (req, res) => {
+  try {
+    if (req.user.role !== "admin") {
+      return res.status(403).json({ message: "Admin access required" });
+    }
+
+    const tickets = await SupportTicket.find()
+      .populate("userId", "username email phonenumber profileImage")
+      .populate("orderId", "totalPrice totalItems status paymentStatus createdAt")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    res.status(200).json({
+      message: "All support tickets retrieved successfully",
+      count: tickets.length,
+      tickets,
+    });
+  } catch (error) {
+    res.status(500).json({
+      message: "Error retrieving admin tickets",
+      error: error.message,
+    });
+  }
+};
+
+// PUT /api/admin/tickets/:id/status - Update ticket status
+exports.updateAdminTicketStatus = async (req, res) => {
+  try {
+    if (req.user.role !== "admin") {
+      return res.status(403).json({ message: "Admin access required" });
+    }
+
+    const { status } = req.body;
+    if (!["open", "in_progress", "waiting_on_customer", "resolved", "closed"].includes(status)) {
+      return res.status(400).json({ message: "Invalid ticket status" });
+    }
+
+    const ticket = await SupportTicket.findByIdAndUpdate(
+      req.params.id,
+      { status },
+      { new: true }
+    ).populate("userId", "username email phonenumber");
+
+    if (!ticket) {
+      return res.status(404).json({ message: "Ticket not found" });
+    }
+
+    const { createNotification } = require("./notificationController");
+    await createNotification(
+      ticket.userId._id,
+      "system",
+      "Support Ticket Updated",
+      `Your support ticket ${ticket._id.toString().slice(-8).toUpperCase()} is now ${status.replace("_", " ")}.`,
+      { ticketId: ticket._id, status }
+    );
+
+    res.status(200).json({
+      message: "Ticket status updated successfully",
+      ticket,
+    });
+  } catch (error) {
+    res.status(500).json({
+      message: "Error updating ticket status",
+      error: error.message,
+    });
+  }
+};
+
+// POST /api/admin/tickets/:id/messages - Reply to a support ticket
+exports.replyToAdminTicket = async (req, res) => {
+  try {
+    if (req.user.role !== "admin") {
+      return res.status(403).json({ message: "Admin access required" });
+    }
+
+    const { message } = req.body;
+    if (!message?.trim()) {
+      return res.status(400).json({ message: "Message cannot be empty" });
+    }
+
+    const ticket = await SupportTicket.findById(req.params.id);
+    if (!ticket) {
+      return res.status(404).json({ message: "Ticket not found" });
+    }
+
+    ticket.messages.push({
+      sender: "agent",
+      message: message.trim(),
+      createdAt: new Date(),
+    });
+
+    if (ticket.status === "open") {
+      ticket.status = "in_progress";
+    }
+
+    await ticket.save();
+
+    const populatedTicket = await SupportTicket.findById(ticket._id)
+      .populate("userId", "username email phonenumber")
+      .populate("orderId", "totalPrice totalItems status paymentStatus createdAt");
+
+    const { createNotification } = require("./notificationController");
+    await createNotification(
+      ticket.userId,
+      "system",
+      "Support Agent Replied",
+      `An agent replied to your support ticket ${ticket._id.toString().slice(-8).toUpperCase()}: "${message.length > 50 ? message.slice(0, 50) + "..." : message}"`,
+      { ticketId: ticket._id, status: ticket.status }
+    );
+
+    res.status(200).json({
+      message: "Reply sent successfully",
+      ticket: populatedTicket,
+    });
+  } catch (error) {
+    res.status(500).json({
+      message: "Error replying to ticket",
+      error: error.message,
+    });
+  }
+};
+

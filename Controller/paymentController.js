@@ -1,6 +1,5 @@
 const axios = require("axios");
 const Order = require("../Models/orderModel");
-const Cart = require("../Models/cartModel");
 const Product = require("../Models/productModel");
 
 const FLOUCI_API = "https://developers.flouci.com/api";
@@ -18,9 +17,7 @@ const isFlouciConfigured = () => {
   );
 };
 
-// ═══════════════════════════════════════════════════════
 // Helper: Finalize an order after successful payment
-// ═══════════════════════════════════════════════════════
 const { createNotification } = require("./notificationController");
 const { awardPurchasePointsForOrder } = require("./loyaltyController");
 
@@ -48,14 +45,7 @@ const finalizeOrder = async (order) => {
     );
   }
 
-  // 3. Clear user's MongoDB cart
-  await Cart.findOneAndUpdate(
-    { userId: order.userId },
-    { items: [], totalPrice: 0, totalItems: 0 },
-    { new: true }
-  );
-
-  // 4. Award purchase loyalty points on the backend (idempotent per orderId)
+  // 3. Award purchase loyalty points on the backend (idempotent per orderId)
   try {
     await awardPurchasePointsForOrder({
       userId: order.userId,
@@ -109,9 +99,7 @@ exports.initiatePayment = async (req, res) => {
     const successUrl = `${frontendUrl}/payment/success?order_id=${order._id}`;
     const failUrl = `${frontendUrl}/payment/fail?order_id=${order._id}`;
 
-    // ──────────────────────────────────────────────
     // TEST MODE: Skip Flouci API when no real credentials
-    // ──────────────────────────────────────────────
     if (!isFlouciConfigured()) {
       console.log("[Payment] TEST MODE — Flouci credentials not configured, simulating payment");
       const testPaymentId = `test_${order._id}_${Date.now()}`;
@@ -129,9 +117,7 @@ exports.initiatePayment = async (req, res) => {
       });
     }
 
-    // ──────────────────────────────────────────────
     // PRODUCTION: Call Flouci generate_payment API
-    // ──────────────────────────────────────────────
     const flouciRes = await axios.post(`${FLOUCI_API}/generate_payment`, {
       app_token: process.env.FLOUCI_APP_TOKEN,
       app_secret: process.env.FLOUCI_APP_SECRET,
@@ -204,9 +190,7 @@ exports.verifyPayment = async (req, res) => {
       });
     }
 
-    // ──────────────────────────────────────────────
     // TEST MODE: Auto-approve if payment_id starts with "test_"
-    // ──────────────────────────────────────────────
     if (payment_id.startsWith("test_")) {
       console.log("[Payment] TEST MODE — Auto-approving payment:", payment_id);
       const finalizedOrder = await finalizeOrder(order);
@@ -218,9 +202,7 @@ exports.verifyPayment = async (req, res) => {
       });
     }
 
-    // ──────────────────────────────────────────────
     // PRODUCTION: Call Flouci verify_payment API
-    // ──────────────────────────────────────────────
     const flouciRes = await axios.get(
       `${FLOUCI_API}/verify_payment/${payment_id}`,
       {

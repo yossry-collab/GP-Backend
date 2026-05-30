@@ -1,8 +1,6 @@
 const Notification = require("../Models/notificationModel");
 
-// ═══════════════════════════════════════════════════════
-// ─── HELPER: Create a notification (used by other controllers) ──
-// ═══════════════════════════════════════════════════════
+// HELPER: Create a notification (used by other controllers)
 exports.createNotification = async (userId, type, title, message, data = {}) => {
   try {
     const notif = await Notification.create({ userId, type, title, message, data });
@@ -13,9 +11,7 @@ exports.createNotification = async (userId, type, title, message, data = {}) => 
   }
 };
 
-// ═══════════════════════════════════════════════════════
-// ─── GET /api/notifications — User's notifications ───
-// ═══════════════════════════════════════════════════════
+// GET /api/notifications — User's notifications
 exports.getNotifications = async (req, res) => {
   try {
     const userId = req.user.userId || req.user._id;
@@ -39,9 +35,7 @@ exports.getNotifications = async (req, res) => {
   }
 };
 
-// ═══════════════════════════════════════════════════════
-// ─── GET /api/notifications/unread-count ─────────────
-// ═══════════════════════════════════════════════════════
+// GET /api/notifications/unread-count
 exports.getUnreadCount = async (req, res) => {
   try {
     const userId = req.user.userId || req.user._id;
@@ -52,9 +46,7 @@ exports.getUnreadCount = async (req, res) => {
   }
 };
 
-// ═══════════════════════════════════════════════════════
 // ─── PUT /api/notifications/:id/read — Mark one as read
-// ═══════════════════════════════════════════════════════
 exports.markAsRead = async (req, res) => {
   try {
     const userId = req.user.userId || req.user._id;
@@ -70,9 +62,7 @@ exports.markAsRead = async (req, res) => {
   }
 };
 
-// ═══════════════════════════════════════════════════════
 // ─── PUT /api/notifications/read-all — Mark all as read
-// ═══════════════════════════════════════════════════════
 exports.markAllAsRead = async (req, res) => {
   try {
     const userId = req.user.userId || req.user._id;
@@ -83,9 +73,7 @@ exports.markAllAsRead = async (req, res) => {
   }
 };
 
-// ═══════════════════════════════════════════════════════
-// ─── DELETE /api/notifications/:id — Delete one ──────
-// ═══════════════════════════════════════════════════════
+// DELETE /api/notifications/:id — Delete one
 exports.deleteNotification = async (req, res) => {
   try {
     const userId = req.user.userId || req.user._id;
@@ -97,9 +85,7 @@ exports.deleteNotification = async (req, res) => {
   }
 };
 
-// ═══════════════════════════════════════════════════════
-// ─── DELETE /api/notifications — Clear all ────────────
-// ═══════════════════════════════════════════════════════
+// DELETE /api/notifications — Clear all
 exports.clearAll = async (req, res) => {
   try {
     const userId = req.user.userId || req.user._id;

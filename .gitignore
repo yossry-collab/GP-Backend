@@ -8,3 +8,5 @@ uploads/
 dist/
 build/
 package-lock.json
+
+/src/generated/prisma

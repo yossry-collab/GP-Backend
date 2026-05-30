@@ -37,9 +37,7 @@ const loyaltyBalanceSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// ═══════════════════════════════════════════════════════
-// ─── POINTS TRANSACTION LOG ──────────────────────────
-// ═══════════════════════════════════════════════════════
+// POINTS TRANSACTION LOG
 const pointsTransactionSchema = new mongoose.Schema(
   {
     userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
@@ -73,10 +71,7 @@ const pointsTransactionSchema = new mongoose.Schema(
 );
 pointsTransactionSchema.index({ userId: 1, createdAt: -1 });
 pointsTransactionSchema.index({ idempotencyKey: 1 }, { unique: true, sparse: true });
-
-// ═══════════════════════════════════════════════════════
-// ─── REWARDS (redeemable items) ──────────────────────
-// ═══════════════════════════════════════════════════════
+// REWARDS (redeemable items)
 const rewardSchema = new mongoose.Schema(
   {
     name: { type: String, required: true },
@@ -102,9 +97,7 @@ const rewardSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// ═══════════════════════════════════════════════════════
-// ─── REWARD REDEMPTION LOG ───────────────────────────
-// ═══════════════════════════════════════════════════════
+// REWARD REDEMPTION LOG
 const redemptionSchema = new mongoose.Schema(
   {
     userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
@@ -117,9 +110,7 @@ const redemptionSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// ═══════════════════════════════════════════════════════
-// ─── SIDE QUESTS (Gamification) ──────────────────────
-// ═══════════════════════════════════════════════════════
+// SIDE QUESTS (Gamification)
 const questSchema = new mongoose.Schema(
   {
     questKey: { type: String, default: null },
@@ -165,7 +156,7 @@ const questSchema = new mongoose.Schema(
 );
 questSchema.index({ questKey: 1 }, { unique: true, sparse: true });
 
-// ─── User quest progress ─────────────────────────────
+// User quest progress
 const userQuestSchema = new mongoose.Schema(
   {
     userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
@@ -180,9 +171,7 @@ const userQuestSchema = new mongoose.Schema(
 );
 userQuestSchema.index({ userId: 1, questId: 1 }, { unique: true });
 
-// ═══════════════════════════════════════════════════════
-// ─── PACKS (FIFA-Inspired Loot System) ───────────────
-// ═══════════════════════════════════════════════════════
+// PACKS (FIFA-Inspired Loot System)
 const packSchema = new mongoose.Schema(
   {
     name: { type: String, required: true },
@@ -222,7 +211,7 @@ const packSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// ─── Pack opening log ────────────────────────────────
+// Pack opening log
 const packOpeningSchema = new mongoose.Schema(
   {
     userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
@@ -240,9 +229,7 @@ const packOpeningSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// ═══════════════════════════════════════════════════════
-// ─── MEMBERSHIP TIERS (GamePlus) ─────────────────────
-// ═══════════════════════════════════════════════════════
+// MEMBERSHIP TIERS (GamePlus)
 const membershipSchema = new mongoose.Schema(
   {
     tier: { type: String, enum: ["silver", "gold", "platinum"], required: true, unique: true },
@@ -259,9 +246,7 @@ const membershipSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// ═══════════════════════════════════════════════════════
-// ─── LOYALTY CONFIG (admin-editable settings) ────────
-// ═══════════════════════════════════════════════════════
+// LOYALTY CONFIG (admin-editable settings)
 const loyaltyConfigSchema = new mongoose.Schema(
   {
     key: { type: String, required: true, unique: true },
@@ -271,9 +256,7 @@ const loyaltyConfigSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// ═══════════════════════════════════════════════════════
-// ─── COUPONS (redeemed/pack generated codes) ─────────
-// ═══════════════════════════════════════════════════════
+// COUPONS (redeemed/pack generated codes)
 const couponSchema = new mongoose.Schema(
   {
     code: { type: String, required: true, unique: true },
@@ -294,9 +277,7 @@ const couponSchema = new mongoose.Schema(
 );
 couponSchema.index({ userId: 1, status: 1, expiresAt: 1 });
 
-// ═══════════════════════════════════════════════════════
-// ─── ABUSE FLAGS (fraud / farming alerts) ────────────
-// ═══════════════════════════════════════════════════════
+// ABUSE FLAGS (fraud / farming alerts)
 const abuseFlagSchema = new mongoose.Schema(
   {
     userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
