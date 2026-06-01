@@ -34,7 +34,6 @@ router.post("/membership/upgrade", verifyToken, lc.upgradeTier);
 // Admin: Overview
 router.get("/admin/stats", verifyToken, lc.adminLoyaltyStats);
 router.get("/admin/abuse-flags", verifyToken, lc.adminGetAbuseFlags);
-router.post("/admin/seed", verifyToken, lc.seedDefaults);
 router.post("/admin/grant-points", verifyToken, lc.adminGrantPoints);
 
 // Admin: Config

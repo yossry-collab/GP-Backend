@@ -9,7 +9,7 @@ const userRoutes = require("./Routes/userRoutes.js");
 const productRoutes = require("./Routes/productRoutes.js");
 const importRoutes = require("./Routes/importRoutes.js");
 const orderRoutes = require("./Routes/orderRoutes.js");
-const cwRoutes = require("./Routes/codesWholesaleRoutes.js");
+// const cwRoutes = require("./Routes/codesWholesaleRoutes.js");
 const adminRoutes = require("./Routes/adminRoutes.js");
 const loyaltyRoutes = require("./Routes/loyaltyRoutes.js");
 const paymentRoutes = require("./Routes/paymentRoutes.js");
@@ -61,8 +61,9 @@ app.use("/api/import", importRoutes);
 // Order Routes
 app.use("/api/orders", orderRoutes);
 
-// CodesWholesale Routes
-app.use("/api/cw", cwRoutes);
+// CodesWholesale Routes 
+
+// app.use("/api/cw", cwRoutes);
 
 // Admin Routes
 app.use("/api/admin", adminRoutes);

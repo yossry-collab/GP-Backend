@@ -1,9 +1,9 @@
 const axios = require("axios");
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
-const OPENAI_BASE_URL =
-  process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
+// Use Gemini for LLM responses
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash";
+const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 const normalize = (value = "") =>
   value
@@ -239,7 +239,7 @@ const buildRuleBasedReply = ({
   };
 };
 
-const canUseLlm = () => Boolean(OPENAI_API_KEY);
+const canUseLlm = () => Boolean(GEMINI_API_KEY);
 
 const buildSystemPrompt = ({ locale, knowledgeArticles, supportContext }) => {
   const contextLines = buildContextLines(locale, supportContext);
@@ -275,37 +275,31 @@ const buildSystemPrompt = ({ locale, knowledgeArticles, supportContext }) => {
 };
 
 const getLlmReply = async ({ locale, message, history, articles, supportContext }) => {
-  const response = await axios.post(
-    `${OPENAI_BASE_URL.replace(/\/$/, "")}/chat/completions`,
-    {
-      model: OPENAI_MODEL,
-      temperature: 0.3,
-      messages: [
-        {
-          role: "system",
-          content: buildSystemPrompt({
-            locale,
-            knowledgeArticles: articles,
-            supportContext,
-          }),
-        },
-        ...(history || []).slice(-6).map((item) => ({
-          role: item.role === "assistant" ? "assistant" : "user",
-          content: item.text,
-        })),
-        { role: "user", content: message },
-      ],
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      timeout: 15000,
-    },
-  );
+  if (!GEMINI_API_KEY) throw new Error("Missing GEMINI_API_KEY");
 
-  return response.data?.choices?.[0]?.message?.content?.trim() || null;
+  const systemPrompt = buildSystemPrompt({ locale, knowledgeArticles: articles, supportContext });
+
+  // Build contents from history (skip system)
+  const turns = (history || []).slice(-8).map((item) => ({
+    role: item.role === "assistant" ? "model" : "user",
+    parts: [{ text: item.text }],
+  }));
+
+  // Add current user message
+  turns.push({ role: "user", parts: [{ text: message }] });
+
+  const payload = {
+    system_instruction: { parts: [{ text: systemPrompt }] },
+    contents: turns,
+    generationConfig: { temperature: 0.3, maxOutputTokens: 800 },
+  };
+
+  const response = await axios.post(`${GEMINI_API_URL}?key=${GEMINI_API_KEY}`, payload, {
+    headers: { "Content-Type": "application/json" },
+    timeout: 20000,
+  });
+
+  return response.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || null;
 };
 
 const buildSuggestedPrompts = (locale) =>

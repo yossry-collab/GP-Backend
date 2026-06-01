@@ -138,7 +138,7 @@ exports.sendMessage = async (req, res) => {
         conversation.messages.push({
           role: "user",
           content: message,
-          timestamp: new Date()
+          
         });
 
         const botResponse = `Demande transmise à l'administrateur. Un agent vous contactera par email (${userDetails.email}).`;

@@ -1,11 +1,16 @@
-const Product = require("../Models/productModel");
+const Product = require("../Models/productModel")
 
 // CREATE - Add new product
 exports.createProduct = async (req, res) => {
   try {
-    const { name, description, price, category, image, stock } = req.body;
-
-    // Validate required fields
+    const { name, description, price, category, image, stock } = req.body
+    if(!req.user){
+      return res.status(500).json({
+        message: "product creation failed",
+      });
+    }
+    
+    // Validate required fields productt
     if (!name || !price || !category) {
       return res.status(400).json({
         message: "Name, price, and category are required",

@@ -19,7 +19,7 @@ const SMTP_TIMEOUT_MS = 15000;
  * Requirements: min 8 chars, at least 1 uppercase, 1 lowercase, 1 number
  */
 function validatePasswordStrength(password) {
-  const minLength = 8;
+  const minLength = 6;
   const hasUpperCase = /[A-Z]/.test(password);
   const hasLowerCase = /[a-z]/.test(password);
   const hasNumber = /[0-9]/.test(password);

@@ -318,3 +318,4 @@ module.exports = {
   Coupon: mongoose.model("Coupon", couponSchema),
   AbuseFlag: mongoose.model("AbuseFlag", abuseFlagSchema),
 };
+
