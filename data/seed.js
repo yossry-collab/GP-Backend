@@ -6,7 +6,7 @@ require('dotenv').config();
 
 const Product = require('../Models/productModel');
 
-const MONGODB_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/gameplug';
+const MONGODB_URI = process.env.MONGODB_URI || process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/gameplug';
 
 // Map CSV category names to our model enum values
 const categoryMap = {

@@ -21,17 +21,6 @@ connectDB();
 
 const app = express();
 
-// Simple request logger to aid debugging
-app.use((req, res, next) => {
-  try {
-    console.log(`[REQ] ${req.method} ${req.originalUrl} - IP: ${req.ip}`);
-    if (req.method !== 'GET') {
-      console.log('[REQ BODY]', JSON.stringify(req.body || req._parsedUrl || {}));
-    }
-  } catch (e) {}
-  next();
-});
-
 // CORS Configuration
 const corsOptions = {
   origin: ['http://localhost:3000', 'http://localhost:3001', 'https://gameplug.onrender.com', 'https://gameplug.vercel.app', 'https://gp-frontend-navy.vercel.app'],
@@ -44,6 +33,14 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json());
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+
+// Clean request logger (skips OPTIONS preflight noise)
+app.use((req, res, next) => {
+  if (req.method !== 'OPTIONS') {
+    console.log(`[REQ] ${req.method} ${req.originalUrl}`);
+  }
+  next();
+});
 
 app.get("/", (req, res) => {
   res.send("API running with MongoDB 🚀");
